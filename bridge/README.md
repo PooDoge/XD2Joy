@@ -34,7 +34,7 @@ work. Bluetooth keeps working too; see [Choosing the input](#choosing-the-input)
 | PA11 (USB D−) | CN10 pin 14 | USB-A breakout D− |
 | PA12 (USB D+) | CN10 pin 12 | USB-A breakout D+ |
 | 5V | CN7 pin 18 | USB-A breakout VBUS |
-| GND | CN7 pin 20 | USB-A breakout GND |
+| GND | CN7 pin 8 (or 19, 20, 22) | USB-A breakout GND |
 | PB6 (USART1 TX) | CN10 pin 17 / Arduino D10 | **left** board P0.08 (marked RX or D0) |
 | PC6 (USART6 TX) | CN10 pin 4 | **right** board P0.08 (marked RX or D0) |
 | GND | any GND | GND on both nRF boards |
