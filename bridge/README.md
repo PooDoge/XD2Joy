@@ -47,6 +47,29 @@ the right) stays as it is.
 current limited to roughly 500 mA. A plain keyboard plus a mouse receiver fits.
 A keyboard with lots of RGB may not; use a powered hub for that.
 
+### Powering everything from one 5 V supply
+
+One fused 5 V supply can run the socket, the hub, an RGB keyboard and both
+nRF boards:
+
+- Put a 2 A fuse or polyfuse on the supply's +5 V before anything branches
+  off. Go to 3 A if a bright RGB keyboard trips it.
+- Feed the USB-A socket's VBUS from the supply, and remove the wire from the
+  Nucleo's 5V (CN7 pin 18) to VBUS so two sources never meet. Put a 470 µF
+  capacitor, rated 10 V or more, across VBUS and GND near the socket.
+- Power each nRF board through its own USB-C socket with a short pigtail
+  that carries only VBUS and GND. Don't feed 5 V into B+ (battery input,
+  4.2 V max) or 3V3 (regulator output). Swap the lead for a data cable when
+  you need the web tool, flashing or keyboard mode.
+- Never power the nRF boards from the hub's ports, because they would
+  enumerate on the bridge.
+- Optional: run the Nucleo from the supply too, by moving jumper JP5 to E5V
+  and feeding CN7 pin 6. Power the supply on before plugging in the ST-LINK
+  USB. These pins come from UM1724 and haven't been checked on a board.
+- Join every ground. Before connecting devices, the supply should read
+  5.0 to 5.2 V unloaded, and VBUS at the socket should stay above 4.75 V
+  with the keyboard lit.
+
 ## Build and flash
 
 Needs `arm-none-eabi-gcc` (e.g. `sudo apt install gcc-arm-none-eabi` or
