@@ -180,6 +180,11 @@ image to flash is copied to `firmware/out/`
 
 Do one board at a time both show up as a drive named NICENANO. So try and keep track on what one you reset/flashed and wired correctly.
 
+Firmware with the `bootloader` console command can be updated from the desktop tool in
+[`tool/`](tool/README.md) instead: it restarts the board into its bootloader, finds the right
+drive, and copies the file for you. The console also answers `ver` with the firmware version,
+protocol version and side.
+
 ### Using it in the web tool
 
 Open [XD2Joy-WebTool](https://desktopsetup.github.io/XD2Joy-Webtool/) in Chrome on a computer make sure both boards are still connected to the PC. press **Connect** and

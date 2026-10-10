@@ -1,0 +1,10 @@
+[package]
+name = "xd2joy-proto"
+description = "The XD2Joy console protocol: commands, reply lines, board identities. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true

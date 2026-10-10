@@ -715,6 +715,37 @@ static int prof_load(uint8_t n, bool tell_peer)
 	return 0;
 }
 
+#ifndef XD2JOY_FW_VERSION
+#define XD2JOY_FW_VERSION "dev"
+#endif
+/* Bumped when a console command or reply line changes shape, so the desktop
+ * tool can refuse firmware it does not understand. */
+#define XD2JOY_PROTO 1
+/* Adafruit nRF52 bootloader (nice!nano and Pro Micro clones): GPREGRET 0x57
+ * after a soft reset starts UF2 mode (0x4E would be serial-only DFU). */
+#define JC_GPREGRET_UF2 0x57
+
+static void ver_print(void)
+{
+	printk("[VER] fw %s proto %u side %s\n", XD2JOY_FW_VERSION,
+	       XD2JOY_PROTO,
+#if defined(JC_LEFT)
+	       "L"
+#else
+	       "R"
+#endif
+	);
+}
+
+static void bootloader_enter(void)
+{
+	printk("[BOOT] restarting into the UF2 bootloader\n");
+	/* let the CDC endpoint drain the line above before USB goes away */
+	k_msleep(100);
+	NRF_POWER->GPREGRET = JC_GPREGRET_UF2;
+	NVIC_SystemReset();
+}
+
 static void cfg_cmd_fn(struct k_work *w)
 {
 	const char *c = cfg_cmd;
@@ -857,6 +888,10 @@ static void cfg_cmd_fn(struct k_work *w)
 		sync_cmd(c + 4);
 	} else if (!strncmp(c, "input", 5)) {
 		input_cmd(c + 5);
+	} else if (!strcmp(c, "ver") || !strcmp(c, "ver?")) {
+		ver_print();
+	} else if (!strcmp(c, "bootloader")) {
+		bootloader_enter();
 	} else if (!strncmp(c, "peer", 4)) {
 		c += 4;
 		if (*c == '?' || *c == '\0') {

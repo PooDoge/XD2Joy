@@ -49,6 +49,20 @@ foreach(jc_patched
 endforeach()
 zephyr_compile_definitions(JC_CONN_WIN_OFFSET=4 JC_CONN_WIN_SIZE=3)
 
+# reported by the `ver` console command; the desktop tool shows it and compares
+# it with the firmware it bundles
+execute_process(
+  COMMAND git describe --tags --always --dirty
+  WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+  OUTPUT_VARIABLE jc_version
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+  RESULT_VARIABLE jc_version_rc)
+if(NOT jc_version_rc EQUAL 0 OR NOT jc_version)
+  set(jc_version "dev")
+endif()
+zephyr_compile_definitions(XD2JOY_FW_VERSION="${jc_version}")
+
 target_sources(app PRIVATE
     src/chip_addr.c
     src/console_keep.c
