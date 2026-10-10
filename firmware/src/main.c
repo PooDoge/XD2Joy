@@ -26,6 +26,34 @@
 #if defined(JC_LEFT)
 #include "usb_dev.h"
 #endif
+#include "bridge.h"
+#include "bridge_proto.h"
+
+/* Wakes link_thread as soon as a crossmapped input changes. */
+static K_SEM_DEFINE(link_kick, 0, 1);
+
+#define JC_IN_AUTO 0
+#define JC_IN_BT 1
+#define JC_IN_USB 2
+static uint8_t input_src = JC_IN_AUTO;
+
+#if defined(JC_LEFT)
+#define JC_BR_MINE JC_BR_HAS_KBD
+#else
+#define JC_BR_MINE JC_BR_HAS_MOUSE
+#endif
+
+/* The wired device behind the USB bridge is in use (it wins over BT in auto). */
+static bool wired_active(void)
+{
+	return input_src != JC_IN_BT && (jc_bridge_devices() & JC_BR_MINE);
+}
+
+static bool bt_input_ok(void)
+{
+	return input_src == JC_IN_BT ||
+	       (input_src == JC_IN_AUTO && !wired_active());
+}
 
 #define BUILD_TAG "ease1"
 
@@ -468,6 +496,16 @@ static int cfg_set(const char *name, size_t len, settings_read_cb read_cb,
 		}
 		return 0;
 	}
+	if (settings_name_steq(name, "insrc", &next) && !next) {
+		uint8_t v;
+
+		if (len == sizeof(v) &&
+		    read_cb(cb_arg, &v, sizeof(v)) == (ssize_t)sizeof(v) &&
+		    v <= JC_IN_USB) {
+			input_src = v;
+		}
+		return 0;
+	}
 	if (settings_name_steq(name, "grip", &next) && !next) {
 		uint8_t on;
 
@@ -526,6 +564,7 @@ static void peer_clear(void);
 static void peer_commit(const bt_addr_le_t *addr);
 static void mode_set(uint8_t m);
 static void sync_cmd(const char *a);
+static void input_cmd(const char *a);
 
 static char cfg_cmd[CFG_CMD_MAX];
 static volatile size_t cfg_cmd_len;
@@ -816,6 +855,8 @@ static void cfg_cmd_fn(struct k_work *w)
 		}
 	} else if (!strncmp(c, "sync", 4)) {
 		sync_cmd(c + 4);
+	} else if (!strncmp(c, "input", 5)) {
+		input_cmd(c + 5);
 	} else if (!strncmp(c, "peer", 4)) {
 		c += 4;
 		if (*c == '?' || *c == '\0') {
@@ -2121,7 +2162,7 @@ BT_GATT_SERVICE_DEFINE(_0b_svc_main,
 
 static bool hid_ready(void)
 {
-	return g_mouse && sub_count && mouse_reports > 0;
+	return (g_mouse && sub_count && mouse_reports > 0) || wired_active();
 }
 
 enum adv_mode { ADV_OFF, ADV_BONDED, ADV_PAIRABLE, ADV_WAKE };
@@ -2828,6 +2869,110 @@ static const struct hm_report *hm_layout(
 	return hm_bytes(r) == len ? r : NULL;
 }
 
+#if defined(JC_LEFT)
+/* Decoded keyboard state from any source (BLE HID or the USB bridge). */
+static void kbd_feed(uint8_t mods, const uint8_t keys[6])
+{
+	bool changed = kbd_mods != mods;
+
+	kbd_mods = mods;
+	for (int i = 0; i < 6; i++) {
+		changed = changed || kbd_keys[i] != keys[i];
+		kbd_keys[i] = keys[i];
+		if (kbd_keys[i]) {
+			user_input_seen();
+		}
+	}
+	if (kbd_mods) {
+		user_input_seen();
+	}
+	if (changed) {
+		k_sem_give(&link_kick);
+	}
+
+	{
+		uint8_t want = mode_combo_wanted();
+
+		if (want && !mode_combo_held) {
+			uint8_t target = want - 1;
+
+			mode_set(jc_mode == target ? JC_MODE_JOYCON
+						   : target);
+			kbd_suppress = true;
+		}
+		mode_combo_held = (want != 0);
+	}
+
+	{
+		uint8_t want = prof_combo_wanted();
+
+		if (want && !prof_combo_held && want != prof_active) {
+			prof_load(want, true);
+			kbd_suppress = true;
+		}
+		prof_combo_held = (want != 0);
+	}
+
+	if (kbd_suppress && !kbd_mods && !kbd_keys[0] && !kbd_keys[1] &&
+	    !kbd_keys[2] && !kbd_keys[3] && !kbd_keys[4] && !kbd_keys[5]) {
+		kbd_suppress = false;
+	}
+
+	if (jc_mode == JC_MODE_KEYBOARD && !kbd_suppress) {
+		jc_usb_kbd_send(kbd_mods, kbd_keys);
+	}
+}
+
+void jc_bridge_kbd(uint8_t mods, const uint8_t keys[6])
+{
+	if (wired_active()) {
+		kbd_feed(mods, keys);
+	}
+}
+
+void jc_bridge_mouse(int16_t dx, int16_t dy, int8_t wheel, uint8_t buttons)
+{
+	ARG_UNUSED(dx); ARG_UNUSED(dy); ARG_UNUSED(wheel); ARG_UNUSED(buttons);
+}
+#else
+/* Decoded mouse motion from any source (BLE HID or the USB bridge). */
+static void mouse_feed(int16_t x, int16_t y, int8_t wheel, uint8_t btn,
+		       bool btn_valid)
+{
+	mouse_dx += x;
+	mouse_dy += y;
+	mouse_wheel += wheel;
+	wheel_btn_feed(wheel);
+	if (x || y) {
+		rs_push(x, y);
+		mouse_has_moved = true;
+		user_input_seen();
+	}
+
+	if (btn_valid) {
+		if (btn != mouse_buttons) {
+			k_sem_give(&link_kick);
+		}
+		mouse_buttons = btn;
+		if (btn) {
+			user_input_seen();
+		}
+	}
+}
+
+void jc_bridge_mouse(int16_t dx, int16_t dy, int8_t wheel, uint8_t buttons)
+{
+	if (wired_active()) {
+		mouse_feed(dx, dy, wheel, buttons, true);
+	}
+}
+
+void jc_bridge_kbd(uint8_t mods, const uint8_t keys[6])
+{
+	ARG_UNUSED(mods); ARG_UNUSED(keys);
+}
+#endif
+
 static uint8_t mouse_notify(struct bt_conn *conn,
 			    struct bt_gatt_subscribe_params *params,
 			    const void *data, uint16_t len)
@@ -2839,6 +2984,10 @@ static uint8_t mouse_notify(struct bt_conn *conn,
 		return BT_GATT_ITER_STOP;
 	}
 	mouse_reports++;
+	if (!bt_input_ok()) {
+		/* a wired device behind the bridge owns this half */
+		return BT_GATT_ITER_CONTINUE;
+	}
 
 	{
 		static uint8_t prev[32];
@@ -2896,48 +3045,7 @@ static uint8_t mouse_notify(struct bt_conn *conn,
 			mods = gmods;
 			memcpy(keys, gkeys, 6);
 		}
-		kbd_mods = mods;
-		for (int i = 0; i < 6; i++) {
-			kbd_keys[i] = keys[i];
-			if (kbd_keys[i]) {
-				user_input_seen();
-			}
-		}
-		if (kbd_mods) {
-			user_input_seen();
-		}
-
-		{
-			uint8_t want = mode_combo_wanted();
-
-			if (want && !mode_combo_held) {
-				uint8_t target = want - 1;
-
-				mode_set(jc_mode == target ? JC_MODE_JOYCON
-							   : target);
-				kbd_suppress = true;
-			}
-			mode_combo_held = (want != 0);
-		}
-
-		{
-			uint8_t want = prof_combo_wanted();
-
-			if (want && !prof_combo_held && want != prof_active) {
-				prof_load(want, true);
-				kbd_suppress = true;
-			}
-			prof_combo_held = (want != 0);
-		}
-
-		if (kbd_suppress && !kbd_mods && !kbd_keys[0] && !kbd_keys[1] &&
-		    !kbd_keys[2] && !kbd_keys[3] && !kbd_keys[4] && !kbd_keys[5]) {
-			kbd_suppress = false;
-		}
-
-		if (jc_mode == JC_MODE_KEYBOARD && !kbd_suppress) {
-			jc_usb_kbd_send(kbd_mods, kbd_keys);
-		}
+		kbd_feed(mods, keys);
 	}
 	return BT_GATT_ITER_CONTINUE;
 #else
@@ -2970,28 +3078,11 @@ static uint8_t mouse_notify(struct bt_conn *conn,
 			return BT_GATT_ITER_CONTINUE;
 		}
 
-		mouse_dx += x;
-		mouse_dy += y;
-		mouse_wheel += wheel;
-		wheel_btn_feed(wheel);
-		if (x || y) {
-			rs_push(x, y);
+		if ((x || y) && !rpt_handle) {
+			rpt_handle = params->value_handle;
 		}
-
-		if (x || y) {
-			mouse_has_moved = true;
-			user_input_seen();
-			if (!rpt_handle) {
-				rpt_handle = params->value_handle;
-			}
-		}
-
-		if (trust ? (have & HM_BTN) != 0 : rpt_handle != 0) {
-			mouse_buttons = btn;
-			if (btn) {
-				user_input_seen();
-			}
-		}
+		mouse_feed(x, y, wheel, btn,
+			   trust ? (have & HM_BTN) != 0 : rpt_handle != 0);
 	}
 	return BT_GATT_ITER_CONTINUE;
 #endif
@@ -3567,6 +3658,14 @@ static void scan_work_handler(struct k_work *work)
 	if (g_mouse && !scan_forced()) {
 		return;
 	}
+	if ((input_src == JC_IN_USB || wired_active()) && !scan_forced()) {
+		/* keep the radio for the console while input is wired */
+		if (scan_on) {
+			bt_le_scan_stop();
+			scan_on = false;
+		}
+		return;
+	}
 	if (!scan_on || scan_is_fast != fast) {
 		bt_le_scan_stop();
 		scan_on = false;
@@ -4100,7 +4199,8 @@ static void link_thread(void *a, void *b, void *c)
 		    (k_uptime_get() - peer_last_rx) > LINK_STALE_MS) {
 			peer_buttons = 0;
 		}
-		k_msleep(10);
+		/* 10 ms housekeeping tick, but send at once when input changes */
+		k_sem_take(&link_kick, K_MSEC(10));
 	}
 }
 
@@ -4810,6 +4910,85 @@ static void console_drop_fn(struct k_work *work)
 }
 static K_WORK_DEFINE(console_drop_work, console_drop_fn);
 
+static const char *input_src_name(void)
+{
+	return input_src == JC_IN_BT ? "bt" : input_src == JC_IN_USB ? "usb"
+								      : "auto";
+}
+
+static void input_print(void)
+{
+	printk("[INPUT] src=%s wired=%s bridge=0x%02X frames=%u bad=%u\n",
+	       input_src_name(), wired_active() ? "active" : "none",
+	       jc_bridge_devices(), jc_bridge_frames(),
+	       jc_bridge_bad_frames());
+}
+
+/* Zero whatever the wired device was holding down. */
+static void wired_release(void)
+{
+#if defined(JC_LEFT)
+	static const uint8_t none[6];
+
+	kbd_feed(0, none);
+#else
+	mouse_feed(0, 0, 0, 0, true);
+#endif
+}
+
+static void input_cmd(const char *a)
+{
+	uint8_t want = 0xFF;
+
+	while (*a == ' ' || *a == '\t') {
+		a++;
+	}
+	if (!strcmp(a, "auto")) {
+		want = JC_IN_AUTO;
+	} else if (!strcmp(a, "bt")) {
+		want = JC_IN_BT;
+	} else if (!strcmp(a, "usb")) {
+		want = JC_IN_USB;
+	}
+	if (want != 0xFF && want != input_src) {
+		bool was_wired = wired_active();
+
+		input_src = want;
+		settings_save_one("jc/insrc", &input_src, sizeof(input_src));
+		if (was_wired && !wired_active()) {
+			wired_release();
+		}
+		if (want == JC_IN_USB && g_mouse) {
+			bt_conn_disconnect(g_mouse,
+					   BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		}
+		k_work_schedule(&scan_work, K_NO_WAIT);
+		k_work_submit(&adv_work);
+	}
+	input_print();
+}
+
+void jc_bridge_changed(uint8_t devices)
+{
+	static bool had;
+	bool now = input_src != JC_IN_BT && (devices & JC_BR_MINE);
+
+	if (now == had) {
+		return;
+	}
+	had = now;
+	input_print();
+	if (!now) {
+		wired_release();
+	}
+	/* scanning pauses while wired, and resumes when the device goes */
+	k_work_schedule(&scan_work, K_NO_WAIT);
+	k_work_submit(&adv_work);
+	if (!now && !hid_ready() && g_conn) {
+		k_work_submit(&console_drop_work);
+	}
+}
+
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	if (g_mouse && conn == g_mouse) {
@@ -4846,7 +5025,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		mouse_reports = 0;
 		rpt_handle = 0;
 		k_work_schedule(&scan_work, K_SECONDS(1));
-		if (was_usable && g_conn) {
+		if (was_usable && !hid_ready() && g_conn) {
 			k_work_submit(&console_drop_work);
 		}
 		return;

@@ -59,6 +59,8 @@ for SIDE in RIGHT LEFT; do
   else
     check "$OUT/zephyr.elf" 'XD2Joy \(left\)' "USB name \"XD2Joy (left)\""
   fi
+  check "$OUT/zephyr.dts" 'psels = < 0x1000008 >;' "USB bridge RX on P0.08"
+  check "$OUT/.config" '^CONFIG_UART_1_ASYNC=y$' "USB bridge UART uses DMA receive"
   check "$OUT/.config" '^CONFIG_BT_CTLR_TX_PWR_DBM=8$' "transmit power +8 dBm"
   absent "$OUT/zephyr.elf" 'LTK =' "private log no pairing key print left"
   absent "$OUT/zephyr.elf" ' keys=%02X' "private log, no key codes in the status line"
