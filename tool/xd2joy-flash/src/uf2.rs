@@ -52,7 +52,7 @@ impl Uf2Image {
         let count = bytes.len() / BLOCK;
         let mut family = None;
         let mut span = (u32::MAX, 0u32);
-        for (index, block) in bytes.chunks_exact(BLOCK).enumerate() {
+        for (index, block) in bytes.as_chunks::<BLOCK>().0.iter().enumerate() {
             let word = |at: usize| u32::from_le_bytes([block[at], block[at + 1], block[at + 2], block[at + 3]]);
             if word(0) != MAGIC_START0 || word(4) != MAGIC_START1 || word(BLOCK - 4) != MAGIC_END {
                 return Err(Uf2Error::Magic(index));
