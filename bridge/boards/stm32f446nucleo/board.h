@@ -62,7 +62,21 @@ static inline void board_clock_init(void)
   osc.PLL.PLLP = RCC_PLLP_DIV2;       // 168 MHz SYSCLK
   osc.PLL.PLLQ = 7;                   // 48 MHz for USB
   osc.PLL.PLLR = 2;
-  HAL_RCC_OscConfig(&osc);
+  if (HAL_RCC_OscConfig(&osc) != HAL_OK) {
+    // No 8 MHz clock from the ST-LINK MCO. Fall back to the 16 MHz internal
+    // RC so the bridge still starts and logs; its ±1% is outside USB's
+    // tolerance, so devices may not enumerate reliably.
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    osc.HSEState = RCC_HSE_OFF;
+    osc.HSIState = RCC_HSI_ON;
+    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    osc.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    osc.PLL.PLLM = HSI_VALUE / 1000000;
+    if (HAL_RCC_OscConfig(&osc) != HAL_OK) {
+      while (1) {
+      }
+    }
+  }
 
   per.PeriphClockSelection = RCC_PERIPHCLK_CK48;
   per.Clk48ClockSelection = RCC_CK48CLKSOURCE_PLLQ;

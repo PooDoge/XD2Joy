@@ -26,11 +26,14 @@
 #endif
 #define CFG_TUH_MAX_SPEED BOARD_TUH_MAX_SPEED
 
-#define CFG_TUH_ENUMERATION_BUFSIZE 256
+// Gaming keyboards with many interfaces have configuration descriptors
+// well over 256 bytes.
+#define CFG_TUH_ENUMERATION_BUFSIZE 1024
 #define CFG_TUH_TASK_QUEUE_SZ 64
 
-// One hub so a keyboard and a mouse dongle can share the single port.
-#define CFG_TUH_HUB 1
+// A keyboard and a mouse dongle share the port through a hub. Keyboards
+// with a passthrough USB port contain a second hub.
+#define CFG_TUH_HUB 2
 #define CFG_TUH_DEVICE_MAX (4 * CFG_TUH_HUB + 1)
 
 // Gaming keyboards and combo dongles expose 2-4 HID interfaces each.

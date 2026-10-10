@@ -4908,7 +4908,13 @@ static void console_drop_fn(struct k_work *work)
 				   BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 	}
 }
-static K_WORK_DEFINE(console_drop_work, console_drop_fn);
+static K_WORK_DELAYABLE_DEFINE(console_drop_work, console_drop_fn);
+/*
+ * A wired device that vanishes often comes straight back (a replug, or the
+ * bridge restarting), so the console link gets this long before it drops.
+ * console_drop_fn re-checks hid_ready(), so a device returning cancels it.
+ */
+#define WIRED_DROP_GRACE K_SECONDS(5)
 
 static const char *input_src_name(void)
 {
@@ -4984,8 +4990,10 @@ void jc_bridge_changed(uint8_t devices)
 	/* scanning pauses while wired, and resumes when the device goes */
 	k_work_schedule(&scan_work, K_NO_WAIT);
 	k_work_submit(&adv_work);
-	if (!now && !hid_ready() && g_conn) {
-		k_work_submit(&console_drop_work);
+	if (now) {
+		k_work_cancel_delayable(&console_drop_work);
+	} else if (!hid_ready() && g_conn) {
+		k_work_reschedule(&console_drop_work, WIRED_DROP_GRACE);
 	}
 }
 
@@ -5014,19 +5022,22 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		}
 		hm_reset();
 		batt_forget();
-		mouse_buttons = 0;
+		/* held input belongs to the wired device while it is the source */
+		if (!wired_active()) {
+			mouse_buttons = 0;
 #if defined(JC_LEFT)
-		kbd_mods = 0;
-		memset(kbd_keys, 0, sizeof(kbd_keys));
-		if (jc_mode == JC_MODE_KEYBOARD) {
-			jc_usb_kbd_release_all();
-		}
+			kbd_mods = 0;
+			memset(kbd_keys, 0, sizeof(kbd_keys));
+			if (jc_mode == JC_MODE_KEYBOARD) {
+				jc_usb_kbd_release_all();
+			}
 #endif
+		}
 		mouse_reports = 0;
 		rpt_handle = 0;
 		k_work_schedule(&scan_work, K_SECONDS(1));
 		if (was_usable && !hid_ready() && g_conn) {
-			k_work_submit(&console_drop_work);
+			k_work_reschedule(&console_drop_work, K_NO_WAIT);
 		}
 		return;
 	}

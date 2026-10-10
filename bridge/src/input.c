@@ -17,6 +17,13 @@
 
 #define MAX_ITF CFG_TUH_HID
 #define REFRESH_MS 100
+/*
+ * Motion-only frames go out at most every 2 ms. The nRF only reports to the
+ * console every 15 ms or more, so this costs no latency, and it halves the
+ * UART interrupt load a 1000 Hz mouse puts on the right board. Button
+ * changes still go out at once.
+ */
+#define MOUSE_MIN_MS 2
 
 typedef struct {
 	bool used;
@@ -391,7 +398,9 @@ void input_task(void)
 	}
 
 	/* the nRF boards drop frames for a kind the status says is absent */
-	if (mouse_dirty && (kinds & HP_KIND_MOUSE)) {
+	if (mouse_dirty && (kinds & HP_KIND_MOUSE) &&
+	    (merged_buttons() != sent_buttons ||
+	     now - last_mouse_tx >= MOUSE_MIN_MS)) {
 		send_mouse(now);
 	}
 	if (kbd_dirty && (kinds & HP_KIND_KBD)) {

@@ -20,7 +20,8 @@ work. Bluetooth keeps working too; see [Choosing the input](#choosing-the-input)
   STM32F103 cannot act as a USB host)
 - USB-A female breakout board
 - A small USB hub if you want a keyboard *and* a mouse receiver. Use a powered
-  hub for RGB keyboards (see Power below).
+  hub for RGB keyboards (see Power below). Devices behind the hub should be
+  full-speed (see [Low-speed devices](#low-speed-devices)).
 - 4 jumper wires (+ ground)
 
 ## Wiring
@@ -70,6 +71,16 @@ nRF boards:
   5.0 to 5.2 V unloaded, and VBUS at the socket should stay above 4.75 V
   with the keyboard lit.
 
+### Low-speed devices
+
+STM32F446 errata ES0298 (2.16.2) says the USB host's transmitter can hang
+when it talks to a *low-speed* device through a hub, and ST lists no
+workaround. Gaming and RGB keyboards and most 2.4 GHz receivers are
+full-speed, but cheap office keyboards and mice are often low-speed. The
+bridge log prints each device's speed when it attaches, and a warning when a
+low-speed device is behind a hub. Plug such a device straight into the
+socket instead, or swap it for a full-speed one.
+
 ## Build and flash
 
 Needs `arm-none-eabi-gcc` (e.g. `sudo apt install gcc-arm-none-eabi` or
@@ -91,8 +102,9 @@ new UART1 receiver.
 - **LED LD2:** slow blink means it's waiting for devices; fast blink means it's
   forwarding input.
 - **Bridge log:** open the Nucleo's virtual COM port at 115200 baud. You
-  should see `[USB] device ... attached` and `[HID] ... mounted: keyboard` or
-  `mouse` lines.
+  should see `[USB] device ... attached ... full-speed via hub` and
+  `[HID] ... mounted: keyboard` or `mouse` lines. A watchdog restarts the
+  bridge if it ever stops running, and the log says so when it does.
 - **Board side:** send `input` to a board over its USB serial port (the web
   tool's port, or any serial terminal). It answers with
   `[INPUT] src=auto wired=active bridge=0x03 frames=... bad=...`.
