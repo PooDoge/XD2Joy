@@ -95,7 +95,11 @@ impl Command {
             Command::PeerQuery => "peer".to_owned(),
             Command::PeerClear => "peer none".to_owned(),
             Command::PeerSet { addr, name } => {
-                let name = clean_text(name, PEER_NAME_MAX);
+                // The board reconnects a device that changed address by comparing names byte for
+                // byte, and fills in the advertised name itself when none is sent. So send the
+                // name only when it survives cleaning unchanged.
+                let cleaned = clean_text(name, PEER_NAME_MAX);
+                let name = if cleaned == *name { cleaned } else { String::new() };
                 let mut s = format!("peer {} {}", addr.hex(), addr.kind.peer_word());
                 if !name.is_empty() {
                     s.push(' ');
@@ -276,10 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn peer_uses_the_bare_type_word_and_a_clean_name() {
+    fn peer_uses_the_bare_type_word_and_only_an_exact_name() {
         let addr = BtAddr { bytes: [0xC1, 0x22, 0x33, 0x44, 0x55, 0xF6], kind: AddrType::RandomId };
+        let cmd = Command::PeerSet { addr, name: "Keychron K3".into() };
+        assert_eq!(cmd.encode(), "peer C1:22:33:44:55:F6 random Keychron K3\n");
+        // a name cleaning would change is left to the board, which stores the advertised one
         let cmd = Command::PeerSet { addr, name: "  Logi\tK380 keyboard é extra long name".into() };
-        assert_eq!(cmd.encode(), "peer C1:22:33:44:55:F6 random Logi K380 keyboard ex\n");
+        assert_eq!(cmd.encode(), "peer C1:22:33:44:55:F6 random\n");
         let cmd = Command::PeerSet { addr, name: String::new() };
         assert_eq!(cmd.encode(), "peer C1:22:33:44:55:F6 random\n");
     }

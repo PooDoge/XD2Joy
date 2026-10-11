@@ -275,7 +275,17 @@ impl<B: Bus> Host<B> {
 
     /// Everything the window shows about a board, one command at a time.
     fn first_read(&mut self, side: Side) {
-        match self.request(side, Command::Version) {
+        // The port enumerates before the firmware's console is listening, so a first `ver` can
+        // be lost; ask again before calling the firmware old.
+        let mut answer = self.request(side, Command::Version);
+        for _ in 0..VER_RETRIES {
+            if !matches!(answer, Ok(Outcome::TimedOut(_) | Outcome::Silent)) {
+                break;
+            }
+            self.pump(VER_RETRY_GAP);
+            answer = self.request(side, Command::Version);
+        }
+        match answer {
             Ok(Outcome::Answered(_)) => {}
             Ok(_) => self.emit(HostEvent::NoVersion { side }),
             Err(e) => {
@@ -618,7 +628,17 @@ impl<B: Bus> Host<B> {
             return Err(format!("The {} board could not restore its defaults: {why}.", side_word(side)));
         }
         self.reload(side)?;
-        Ok(format!("Restored the {} board's built-in mapping and unpair key.", side_word(side)))
+        let table = self.run_cmd(side, Command::Profiles)?;
+        let mut done = format!("Restored the {} board's built-in mapping and unpair key.", side_word(side));
+        // The active profile is loaded at boot over the restored mapping. Overwriting it here would
+        // destroy a profile the person may want, so say it instead.
+        if let Some(n) = active_saved(&table) {
+            done.push_str(&format!(
+                " Profile {n} is active and saved, so the board goes back to it when restarted. To keep the \
+                 defaults, save them over profile {n} or clear it."
+            ));
+        }
+        Ok(done)
     }
 
     fn profile_switch(&mut self, slot: Slot) -> Job<String> {
@@ -632,11 +652,24 @@ impl<B: Bus> Host<B> {
             return Err(format!("Profile {} is empty on the {} board.", slot.number(), side_word(side)));
         }
         self.pump(LINK_SETTLE);
+        let mut empty_on = None;
         for s in self.live_sides() {
             self.read_cfg(s)?;
-            self.run_cmd(s, Command::Profiles)?;
+            let table = self.run_cmd(s, Command::Profiles)?;
+            if !slot_saved(&table, slot) {
+                empty_on = Some(s);
+            }
         }
-        Ok(format!("Switched to profile {}.", slot.number()))
+        match empty_on {
+            // a board told to load a slot it never saved keeps its mapping and says nothing
+            Some(s) => Ok(format!(
+                "Switched to profile {}, but it is empty on the {} board, which kept its mapping. Save the profile \
+                 again with both boards connected.",
+                slot.number(),
+                side_word(s)
+            )),
+            None => Ok(format!("Switched to profile {}.", slot.number())),
+        }
     }
 
     /// Check the image, get the board into its bootloader, copy, and wait for it to come back.
@@ -731,6 +764,19 @@ impl<B: Bus> Host<B> {
     }
 }
 
+/// Extra `ver` attempts after the first, and the wait between them.
+const VER_RETRIES: usize = 2;
+const VER_RETRY_GAP: Duration = Duration::from_millis(800);
+
+/// The active slot from a `profile` table, if it holds a saved mapping.
+fn active_saved(replies: &[Reply]) -> Option<u8> {
+    let active = replies.iter().find_map(|r| match r {
+        Reply::Profile(ProfileReply::Active(n)) => Some(*n),
+        _ => None,
+    })?;
+    Slot::new(active).filter(|s| slot_saved(replies, *s)).map(Slot::number)
+}
+
 fn slot_saved(replies: &[Reply], slot: Slot) -> bool {
     replies.iter().any(|r| matches!(r, Reply::Profile(ProfileReply::Slot(s)) if s.slot == slot.number() && s.saved))
 }
@@ -768,7 +814,7 @@ mod tests {
 
         /// Wait until an event matches, up to a few seconds.
         fn wait(&self, what: &str, pred: impl Fn(&HostEvent) -> bool) -> HostEvent {
-            let until = Instant::now() + Duration::from_secs(5);
+            let until = Instant::now() + Duration::from_secs(10);
             while Instant::now() < until {
                 if let Some(e) = self.events.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|e| pred(e)) {
                     return e.clone();
