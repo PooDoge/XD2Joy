@@ -1,80 +1,32 @@
-//! A pretend host for working on the window without boards: `XD2JOY_DEMO=1 cargo run -p xd2joy`.
-//! It plays both boards connecting, answers mode and input changes, and walks through a firmware
-//! update without touching any drive.
+//! A pretend pair of boards for working on the window without hardware:
+//! `XD2JOY_DEMO=1 cargo run -p xd2joy`. The real host drives simulated firmware (`fake.rs`), and a
+//! small thread "types" on the Bluetooth keyboard and clicks the mouse so the live view moves.
 
-use std::{
-    sync::mpsc::{self, Receiver},
-    thread,
-    time::Duration,
-};
+use std::{thread, time::Duration};
 
-use xd2joy_device::ConnectionEvent;
-use xd2joy_proto::{InputSource, Mode, Side, parse_line};
+use xd2joy_proto::Side;
 
 use crate::{
-    host::{HostHandle, Msg, Sink},
-    model::{Effect, FlashStage, HostEvent},
+    fake::FakeBus,
+    host::{self, HostHandle, Sink},
 };
 
 pub fn start(sink: Sink) -> std::io::Result<HostHandle> {
-    let (tx, rx) = mpsc::channel();
-    thread::Builder::new().name("xd2joy-demo".into()).spawn(move || run(&sink, &rx))?;
-    Ok(HostHandle::from_sender(tx))
+    let bus = FakeBus::new();
+    let typist = bus.clone();
+    thread::Builder::new().name("xd2joy-demo".into()).spawn(move || type_forever(&typist))?;
+    host::start(bus, sink)
 }
 
-fn say(sink: &Sink, side: Side, raw: &str) {
-    match parse_line(raw) {
-        Ok(reply) => sink(HostEvent::Board { side, event: ConnectionEvent::Line { raw: raw.to_owned(), reply } }),
-        Err(e) => tracing::error!(raw, error = %e, "the demo script has a line the parser refuses"),
-    }
-}
-
-fn mode_word(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Joycon => "JOYCON",
-        Mode::Stick => "STICK",
-        Mode::Keyboard => "KEYBOARD",
-    }
-}
-
-fn source_word(source: InputSource) -> &'static str {
-    match source {
-        InputSource::Auto => "auto",
-        InputSource::Bluetooth => "bt",
-        InputSource::Usb => "usb",
-    }
-}
-
-fn run(sink: &Sink, rx: &Receiver<Msg>) {
-    sink(HostEvent::Connected { side: Side::Left, port: "/dev/ttyACM0".into() });
-    say(sink, Side::Left, "[VER] fw v0.3.0-demo proto 1 side L");
-    say(sink, Side::Left, "[MODE] JOYCON");
-    say(sink, Side::Left, "[INPUT] src=auto wired=active bridge=0x01 frames=5120 bad=0");
-    sink(HostEvent::Connected { side: Side::Right, port: "/dev/ttyACM1".into() });
-    sink(HostEvent::NoVersion { side: Side::Right });
-    say(sink, Side::Right, "[MODE] JOYCON");
-
-    while let Ok(msg) = rx.recv() {
-        let Msg::Effect(effect) = msg else { continue };
-        match effect {
-            Effect::SetMode(side, mode) => {
-                say(sink, side, &format!("[MODE] now {}, joy-con input on", mode_word(mode)))
-            }
-            Effect::SetInput(side, source) => {
-                say(sink, side, &format!("[INPUT] src={} wired=none bridge=0x00 frames=0 bad=0", source_word(source)))
-            }
-            Effect::Flash { side, file } => {
-                for stage in [
-                    FlashStage::Checking { side, file },
-                    FlashStage::Restarting { side },
-                    FlashStage::Copying { side, drive: "/media/demo/NICENANO".into() },
-                    FlashStage::WaitingForBoard { side },
-                    FlashStage::Done { side },
-                ] {
-                    sink(HostEvent::Flash(stage));
-                    thread::sleep(Duration::from_millis(700));
-                }
-            }
-        }
+fn type_forever(bus: &FakeBus) {
+    // W, then W+D, then nothing; left click, then the back button, then nothing
+    let keys = ["00 00 1A 00 00 00 00 00", "00 00 1A 07 00 00 00 00", "00 00 00 00 00 00 00 00"];
+    let mouse = ["01 00 00 00", "08 00 00 00", "00 00 00 00"];
+    let mut i = 0usize;
+    loop {
+        thread::sleep(Duration::from_millis(900));
+        bus.say(Side::Left, &[format!("[RAW] h=0x0012 len=8: {}", keys[i % keys.len()])]);
+        bus.say(Side::Right, &[format!("[RAW] h=0x0020 len=4: {}", mouse[i % mouse.len()])]);
+        i += 1;
     }
 }

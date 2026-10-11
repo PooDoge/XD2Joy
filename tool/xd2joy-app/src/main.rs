@@ -5,6 +5,7 @@
 //! `ui.rs` (the window), `theme.rs` (colours and spacing), `demo.rs` (a pretend host, `XD2JOY_DEMO=1`).
 
 mod demo;
+mod fake;
 mod host;
 mod model;
 mod theme;
@@ -26,7 +27,7 @@ fn main() {
         // the window closed; the host stops when its handle is dropped
         let _ = tx.unbounded_send(event);
     });
-    let started = if std::env::var_os("XD2JOY_DEMO").is_some() { demo::start(sink) } else { host::start(sink) };
+    let started = if std::env::var_os("XD2JOY_DEMO").is_some() { demo::start(sink) } else { host::start(host::SerialBus, sink) };
     let host = match started {
         Ok(h) => h,
         Err(e) => {

@@ -1,11 +1,13 @@
 //! Finding XD2Joy boards on USB serial and talking to them.
 //!
 //! Files: `lib.rs` (discovery and the plug/unplug diff), `connection.rs` (one open board: a reader
-//! thread that parses lines, and a writer).
+//! thread that parses lines, and a writer), `exchange.rs` (one command in flight and its answer).
 
 mod connection;
+mod exchange;
 
 pub use connection::{Connection, ConnectionEvent};
+pub use exchange::{Exchange, Outcome, SETTLE};
 use xd2joy_proto::Side;
 
 #[derive(Debug, thiserror::Error)]

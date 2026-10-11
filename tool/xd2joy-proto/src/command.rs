@@ -168,6 +168,49 @@ impl Command {
         }
     }
 
+    /// Is this line part of the command's answer (as opposed to chatter printed meanwhile)? The
+    /// device layer keeps these for the caller.
+    pub fn concerns(&self, reply: &Reply) -> bool {
+        match self {
+            Command::Version => matches!(reply, Reply::Version(_)),
+            Command::Bootloader => matches!(reply, Reply::Bootloader),
+            Command::Mode(_) => matches!(reply, Reply::Mode { .. }),
+            Command::Input(_) => matches!(reply, Reply::Input(_)),
+            Command::CfgRead | Command::CfgWrite(_) => matches!(reply, Reply::Cfg(_)),
+            Command::CfgDefault => matches!(reply, Reply::Cfg(_) | Reply::Sync(_)),
+            Command::ScanList => matches!(reply, Reply::Scan(ScanReply::Begin(_) | ScanReply::Listed(_) | ScanReply::End)),
+            Command::PeerQuery => matches!(reply, Reply::Peer(PeerReply::Pin(_) | PeerReply::Attached(_))),
+            Command::Profiles
+            | Command::ProfileSave(_)
+            | Command::ProfileLoad(_)
+            | Command::ProfileClear(_)
+            | Command::ProfileName(..)
+            | Command::ProfileKey(..) => matches!(reply, Reply::Profile(_)),
+            Command::Grip(_) => matches!(reply, Reply::Grip(_)),
+            Command::SyncQuery | Command::SyncEnable(_) | Command::SyncKey(_) => matches!(reply, Reply::Sync(_)),
+            Command::ScanStart | Command::PeerClear | Command::PeerSet { .. } | Command::SyncNow => false,
+        }
+    }
+
+    /// How long the board may take. Writes to flash can stall on garbage collection.
+    pub fn timeout(&self) -> std::time::Duration {
+        use std::time::Duration;
+        match self {
+            _ if self.is_silent() => Duration::from_millis(250),
+            Command::CfgWrite(_) | Command::CfgDefault => Duration::from_secs(8),
+            Command::ProfileSave(_)
+            | Command::ProfileLoad(_)
+            | Command::ProfileClear(_)
+            | Command::ProfileName(..)
+            | Command::ProfileKey(..)
+            | Command::Grip(Some(_))
+            | Command::SyncEnable(_)
+            | Command::SyncKey(_)
+            | Command::Input(Some(_)) => Duration::from_secs(5),
+            _ => Duration::from_secs(2),
+        }
+    }
+
     /// Changes something a person would not want changed by accident; the UI asks first.
     pub fn needs_confirmation(&self) -> bool {
         matches!(self, Command::CfgDefault | Command::SyncNow | Command::PeerClear | Command::ProfileClear(_))

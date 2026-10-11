@@ -16,7 +16,10 @@ pub mod preset;
 pub mod raw;
 mod reply;
 
+pub use blob::{Colours, ConfigBlob, Entry, Rgb};
 pub use command::{Command, Slot};
+pub use mapping::{Binding, Hotkey, Mapping, Source, StickSource, Tuning};
+pub use joycon::{Button, StickDir, Target};
 pub use lines::{LineSplitter, split_glued};
 pub use reply::{
     AddrType, BtAddr, CfgReply, DeviceKind, FirmwareInfo, HidState, InputStatus, LinkEvent, MapReply, ParseError,
