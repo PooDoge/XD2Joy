@@ -4,8 +4,15 @@ if(JC_LEFT)
   list(APPEND EXTRA_DTC_OVERLAY_FILE "${CMAKE_CURRENT_LIST_DIR}/left.overlay")
   list(APPEND EXTRA_CONF_FILE "${CMAKE_CURRENT_LIST_DIR}/left.conf")
 endif()
-list(APPEND EXTRA_DTC_OVERLAY_FILE "${CMAKE_CURRENT_LIST_DIR}/clock_rc.overlay")
-list(APPEND EXTRA_CONF_FILE "${CMAKE_CURRENT_LIST_DIR}/clock_rc.conf")
+# Pro Micro clones have no 32.768 kHz crystal, so they run the low frequency clock from the
+# calibrated RC oscillator. The XIAO has the crystal (Zephyr's xiao_ble and Seeed's Arduino core
+# both use it), so it uses that unless built with -DJC_CLOCK_RC=1.
+if(JC_CLOCK_RC OR NOT BOARD MATCHES "^xiao_ble")
+  list(APPEND EXTRA_DTC_OVERLAY_FILE "${CMAKE_CURRENT_LIST_DIR}/clock_rc.overlay")
+  list(APPEND EXTRA_CONF_FILE "${CMAKE_CURRENT_LIST_DIR}/clock_rc.conf")
+else()
+  list(APPEND EXTRA_DTC_OVERLAY_FILE "${CMAKE_CURRENT_LIST_DIR}/clock_xtal.overlay")
+endif()
 if(NOT JC_LEFT)
   list(APPEND EXTRA_DTC_OVERLAY_FILE "${CMAKE_CURRENT_LIST_DIR}/right.overlay")
   list(APPEND EXTRA_CONF_FILE "${CMAKE_CURRENT_LIST_DIR}/usb_name_right.conf")

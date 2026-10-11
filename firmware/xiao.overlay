@@ -63,6 +63,12 @@
 	status = "disabled";
 };
 
+/* The flash chip node stays "okay" under a disabled &qspi, and that alone builds and starts the
+ * QSPI flash driver (Zephyr instantiates nodes by their own status), so turn the chip off too. */
+&p25q16h {
+	status = "disabled";
+};
+
 &ieee802154 {
 	status = "disabled";
 };
