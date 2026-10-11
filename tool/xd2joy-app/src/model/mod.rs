@@ -195,7 +195,9 @@ impl FlashStage {
             FlashStage::Checking { file, .. } => format!("Checking {}", file.display()),
             FlashStage::Restarting { .. } => "Restarting the board into its bootloader".to_owned(),
             FlashStage::NeedsManualReset { .. } => {
-                "This firmware can't restart itself. Short RST to GND twice quickly on this board.".to_owned()
+                "This firmware can't restart itself. Double-press this board's reset button (on a Pro Micro, short RST \
+                 to GND twice), quickly."
+                    .to_owned()
             }
             FlashStage::Copying { drive, .. } => format!("Copying the firmware to {}", drive.display()),
             FlashStage::WaitingForBoard { .. } => "Waiting for the board to come back".to_owned(),

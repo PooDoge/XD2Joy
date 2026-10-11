@@ -863,7 +863,7 @@ fn board_card(model: State<Model>, m: &Model, side: Side, host: &HostHandle) -> 
         _ if !connected => None,
         Firmware::Unknown => Some(("Checking firmware…".to_owned(), INK_MUTED)),
         Firmware::Old => Some((
-            "Older firmware. Update it once by hand (RST to GND twice); after that this app can do it.".to_owned(),
+            "Older firmware. Update it once by hand (double-press reset); after that this app can do it.".to_owned(),
             WARN,
         )),
         Firmware::Known(info) if v.firmware.newer_than_tool() => Some((

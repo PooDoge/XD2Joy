@@ -333,7 +333,17 @@ pub struct FakeWorld {
     sinks: [Option<Arc<LineSink>>; 2],
     /// Set while a board sits in its bootloader.
     pub drive: Option<Side>,
+    /// What the bootloader drive's `INFO_UF2.TXT` says.
+    pub boot_info: &'static str,
 }
+
+/// A nice!nano / Pro Micro clone bootloader.
+pub const BOOT_NICENANO: &str = "UF2 Bootloader 0.6.0 lib/nrfx (v2.0.0)\nModel: nice!nano\nBoard-ID: nRF52840-nicenano\n\
+                                 SoftDevice: S140 version 6.1.1\n";
+/// The Seeed XIAO nRF52840 Sense's bootloader, as one reported it.
+#[cfg(test)]
+pub const BOOT_XIAO: &str = "UF2 Bootloader 0.6.1 lib/nrfx (v2.0.0)\nModel: Seeed XIAO nRF52840\n\
+                             Board-ID: Seeed_XIAO_nRF52840_Sense\nSoftDevice: S140 version 7.3.0\n";
 
 impl FakeWorld {
     pub fn new() -> FakeWorld {
@@ -341,6 +351,7 @@ impl FakeWorld {
             boards: [FakeBoard::new(Side::Left), FakeBoard::new(Side::Right)],
             sinks: [None, None],
             drive: None,
+            boot_info: BOOT_NICENANO,
         }
     }
 }
@@ -462,9 +473,7 @@ impl Bus for FakeBus {
         w.drive
             .map(|side| BootDrive {
                 mount: PathBuf::from(format!("/media/fake/NICENANO-{}", side.letter())),
-                info: BootInfo::parse(
-                    "UF2 Bootloader 0.6.0 lib/nrfx (v2.0.0)\nModel: nice!nano\nBoard-ID: nRF52840-nicenano\n",
-                ),
+                info: BootInfo::parse(w.boot_info),
             })
             .into_iter()
             .collect()

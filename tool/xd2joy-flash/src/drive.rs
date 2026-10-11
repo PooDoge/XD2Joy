@@ -1,7 +1,7 @@
-//! Bootloader drives. In its bootloader a board shows up as a small USB drive (named `NICENANO` on
-//! these boards) holding `INFO_UF2.TXT`; copying a `.uf2` file onto it flashes the board. Both
-//! boards show the same name, so the tool tells them apart by which drive is *new* after it sent
-//! one board the `bootloader` command.
+//! Bootloader drives. In its bootloader a board shows up as a small USB drive (`NICENANO` on Pro
+//! Micro style boards, `XIAO-SENSE` on a Seeed XIAO) holding `INFO_UF2.TXT`; copying a `.uf2`
+//! file onto it flashes the board. Both halves show the same name, so the tool tells them apart
+//! by which drive is *new* after it sent one board the `bootloader` command.
 
 use std::{
     fs::File,
@@ -22,6 +22,8 @@ pub struct BootInfo {
     pub bootloader: String,
     pub model: Option<String>,
     pub board_id: Option<String>,
+    /// e.g. `S140 version 7.3.0`.
+    pub softdevice: Option<String>,
 }
 
 impl BootInfo {
@@ -35,6 +37,7 @@ impl BootInfo {
                 match key.trim() {
                     "Model" => info.model = Some(value),
                     "Board-ID" => info.board_id = Some(value),
+                    "SoftDevice" => info.softdevice = Some(value),
                     _ => {}
                 }
             }
@@ -46,6 +49,36 @@ impl BootInfo {
     /// sorts of ids), but the caller can warn.
     pub fn looks_like_nrf52840(&self) -> bool {
         self.board_id.as_deref().is_some_and(|id| id.contains("nRF52840"))
+    }
+
+    /// Where this bootloader starts firmware: right after the SoftDevice it keeps, which is S140
+    /// 6.x on nice!nano and Pro Micro clones (0x26000) and 7.x on the Seeed XIAO (0x27000). `None`
+    /// for anything else, which the caller does not check.
+    pub fn app_start(&self) -> Option<u32> {
+        let version = self.softdevice.as_deref()?.strip_prefix("S140 version ")?;
+        match version.split('.').next()? {
+            "6" => Some(0x26000),
+            "7" => Some(0x27000),
+            _ => None,
+        }
+    }
+}
+
+/// Refuse an image that would not start on this board: firmware linked for one SoftDevice layout
+/// copied onto a bootloader with the other either overwrites the end of the SoftDevice or is never
+/// jumped to. Both leave the board without working firmware until it is flashed again.
+pub fn check_layout(info: &BootInfo, image: &Uf2Image) -> Result<(), FlashError> {
+    let Some(board) = info.app_start() else { return Ok(()) };
+    let found = image.span().0;
+    if found == board {
+        Ok(())
+    } else {
+        Err(FlashError::WrongLayout {
+            found,
+            board,
+            softdevice: info.softdevice.clone().unwrap_or_default(),
+            model: info.model.clone().unwrap_or_else(|| "this board".to_owned()),
+        })
     }
 }
 
@@ -104,7 +137,7 @@ pub fn copy_image(drive: &Path, image: &Uf2Image) -> Result<(), FlashError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FAMILY_NRF52840, uf2::tests::image};
+    use crate::{FAMILY_NRF52840, Uf2Error, uf2::tests::image};
 
     const NICENANO: &str = "UF2 Bootloader 0.6.0 lib/nrfx (v2.0.0) lib/tinyusb (0.10.1)\n\
                             Model: nice!nano\nBoard-ID: nRF52840-nicenano\nSoftDevice: S140 version 6.1.1\n";
@@ -118,6 +151,29 @@ mod tests {
         assert!(
             !BootInfo::parse("UF2 Bootloader v3.0\nModel: Raspberry Pi RP2\nBoard-ID: RPI-RP2\n").looks_like_nrf52840()
         );
+    }
+
+    const XIAO: &str = "UF2 Bootloader 0.6.1 lib/nrfx (v2.0.0) lib/tinyusb (0.10.1-293-gaf8e5a90) lib/uf2 \
+                        (remotes/origin/configupdate-9-gadbb8c7)\nModel: Seeed XIAO nRF52840\n\
+                        Board-ID: Seeed_XIAO_nRF52840_Sense\nSoftDevice: S140 version 7.3.0\nDate: Nov 12 2021\n";
+
+    #[test]
+    fn firmware_must_start_where_the_bootloader_jumps() -> Result<(), Uf2Error> {
+        let (nice, xiao) = (BootInfo::parse(NICENANO), BootInfo::parse(XIAO));
+        assert!(xiao.looks_like_nrf52840());
+        assert_eq!((nice.app_start(), xiao.app_start()), (Some(0x26000), Some(0x27000)));
+        let pro_micro_build = Uf2Image::parse(image(2, 0x26000, FAMILY_NRF52840))?;
+        let xiao_build = Uf2Image::parse(image(2, 0x27000, FAMILY_NRF52840))?;
+        assert!(check_layout(&nice, &pro_micro_build).is_ok());
+        assert!(check_layout(&xiao, &xiao_build).is_ok());
+        assert!(matches!(
+            check_layout(&xiao, &pro_micro_build),
+            Err(FlashError::WrongLayout { found: 0x26000, board: 0x27000, .. })
+        ));
+        assert!(check_layout(&nice, &xiao_build).is_err());
+        // a bootloader that names no SoftDevice is not checked
+        assert!(check_layout(&BootInfo::parse("UF2 Bootloader\nBoard-ID: nRF52840-x\n"), &xiao_build).is_ok());
+        Ok(())
     }
 
     #[test]

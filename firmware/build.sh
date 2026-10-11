@@ -3,7 +3,15 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ZP="${ZEPHYR_WORKSPACE:-$HOME/zephyrproject}"
 export ZEPHYR_BASE="$ZP/zephyr"
-BOARD=promicro_nrf52840/nrf52840/uf2
+# XD2JOY_BOARD=xiao builds for the Seeed XIAO nRF52840 / Sense; the default is Pro Micro style boards
+case "${XD2JOY_BOARD:-promicro}" in
+  promicro) BOARD=promicro_nrf52840/nrf52840/uf2 ;;
+  xiao) BOARD=xiao_ble ;;
+  *) BOARD="$XD2JOY_BOARD" ;;
+esac
+XIAO=0
+case "$BOARD" in xiao_ble*) XIAO=1 ;; esac
+echo "board: $BOARD"
 DIR=build_xd2joy
 
 if ! grep -qE "define BT_HCI_LE_INTERVAL_MIN[[:space:]]+0x0004" "$ZEPHYR_BASE/include/zephyr/bluetooth/hci_types.h"; then
@@ -46,7 +54,12 @@ for SIDE in RIGHT LEFT; do
   check "$ZP/$B/compile_commands.json" 'JC_CONN_WIN_OFFSET=4 .*JC_CONN_WIN_SIZE=3 .*lll_scan\.c",$' "conn window patch on: CONNECT_IND (offset 4, size 3)"
   check "$ZP/$B/compile_commands.json" 'JC_CONN_WIN_OFFSET=4 .*JC_CONN_WIN_SIZE=3 .*ull_llcp_conn_upd\.c",$' "conn window patch on: connection update"
   check "$HERE/src/main.c" 'atomic_set_bit\(s->flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE\);' "per connection HID subscriptions (reconnect fix)"
-  if [ "$SIDE" = LEFT ]; then
+  if [ $XIAO -eq 1 ]; then
+    check "$OUT/zephyr.dts" 'psels = < 0x2b >;' "wire TX on D6 (P1.11)"
+    check "$OUT/zephyr.dts" 'psels = < 0x100002c >;' "wire RX on D7 (P1.12)"
+    absent "$OUT/zephyr.dts" 'psels = < 0x9 >;|0x100000a|psels = < 0x24 >;|0x1000026' "no Pro Micro wire pins left"
+    check "$OUT/zephyr.dts" 'code_partition: partition@27000' "starts at 0x27000, after the XIAO's SoftDevice 7.3.0"
+  elif [ "$SIDE" = LEFT ]; then
     check "$OUT/zephyr.dts" 'psels = < 0x9 >;' "wire TX on P0.09 (dev board)"
     check "$OUT/zephyr.dts" 'psels = < 0x100000a >;' "wire RX on P0.10 (Dev board)"
   else
@@ -59,7 +72,12 @@ for SIDE in RIGHT LEFT; do
   else
     check "$OUT/zephyr.elf" 'XD2Joy \(left\)' "USB name \"XD2Joy (left)\""
   fi
-  check "$OUT/zephyr.dts" 'psels = < 0x1000008 >;' "USB bridge RX on P0.08"
+  if [ $XIAO -eq 1 ]; then
+    check "$OUT/zephyr.dts" 'psels = < 0x1000002 >;' "USB bridge RX on D0 (P0.02)"
+    absent "$OUT/zephyr.dts" 'psels = < 0x6 >;' "nothing driven on P0.06 (the XIAO's blue LED)"
+  else
+    check "$OUT/zephyr.dts" 'psels = < 0x1000008 >;' "USB bridge RX on P0.08"
+  fi
   check "$OUT/.config" '^CONFIG_UART_1_ASYNC=y$' "USB bridge UART uses DMA receive"
   check "$OUT/.config" '^CONFIG_BT_CTLR_TX_PWR_DBM=8$' "transmit power +8 dBm"
   absent "$OUT/zephyr.elf" 'LTK =' "private log no pairing key print left"

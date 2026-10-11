@@ -21,7 +21,7 @@ use std::{
 };
 
 use xd2joy_device::{BoardPort, Connection, ConnectionEvent, Exchange, Outcome, list_boards};
-use xd2joy_flash::{BootDrive, FAMILY_NRF52840, Uf2Image, copy_image, list_boot_drives, new_drive};
+use xd2joy_flash::{BootDrive, FAMILY_NRF52840, Uf2Image, check_layout, copy_image, list_boot_drives, new_drive};
 use xd2joy_proto::{
     CfgReply, Command, ConfigBlob, FirmwareInfo, PROTO_VERSION, PeerReply, ProfileReply, Reply, Side, Slot,
 };
@@ -34,7 +34,7 @@ const SCAN_EVERY: Duration = Duration::from_millis(500);
 const RETRY_OPEN: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_millis(100);
 const DRIVE_WAIT_AUTO: Duration = Duration::from_secs(15);
-/// Long enough for someone to find a wire and short RST twice.
+/// Long enough for someone to double-press reset, or find a wire and short RST twice.
 const DRIVE_WAIT_MANUAL: Duration = Duration::from_secs(90);
 const BOARD_WAIT: Duration = Duration::from_secs(20);
 /// How long `scan!` listens (`SCAN_FORCE_MS` in the firmware).
@@ -853,11 +853,13 @@ impl<B: Bus> Host<B> {
             }
             if Instant::now() >= deadline {
                 return Err(if can_restart {
-                    "the board did not show up as a NICENANO drive. If your system does not mount USB drives \
-                     by itself, mount it and try again."
+                    "the board did not show up as a bootloader drive (NICENANO or XIAO-SENSE). If your system \
+                     does not mount USB drives by itself, mount it and try again."
                         .into()
                 } else {
-                    "no bootloader drive appeared. Short RST to GND twice, quickly, on this board.".into()
+                    "no bootloader drive appeared. Double-press the board's reset button (on a Pro Micro, short RST to \
+                     GND twice), quickly."
+                        .into()
                 });
             }
         };
@@ -871,8 +873,23 @@ impl<B: Bus> Host<B> {
                 side_word(other)
             ));
         }
+        tracing::info!(
+            mount = %drive.mount.display(),
+            model = ?drive.info.model,
+            board_id = ?drive.info.board_id,
+            softdevice = ?drive.info.softdevice,
+            image_start = format_args!("{:#x}", image.span().0),
+            "bootloader drive"
+        );
         if !drive.info.looks_like_nrf52840() {
             tracing::warn!(mount = %drive.mount.display(), board_id = ?drive.info.board_id, "unexpected bootloader id");
+        }
+        if let Err(e) = check_layout(&drive.info, &image) {
+            return Err(format!(
+                "{e}. Nothing was copied. Unplug the {} board and plug it back in to leave its bootloader; it \
+                 still has its old firmware. For a Seeed XIAO, build with XD2JOY_BOARD=xiao.",
+                side_word(side)
+            ));
         }
 
         self.emit(HostEvent::Flash(FlashStage::Copying { side, drive: drive.mount.clone() }));
@@ -1180,6 +1197,25 @@ mod tests {
         assert_eq!(e, HostEvent::Flash(FlashStage::Done { side: Side::Right }));
         assert!(rig.received(Side::Right).iter().any(|l| l == "bootloader"));
         assert_eq!(rig.bus.world().boards[1].version, "v1.2-demo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn firmware_for_another_flash_layout_is_not_copied() {
+        let bus = FakeBus::new();
+        bus.world().boot_info = crate::fake::BOOT_XIAO;
+        let rig = Rig::new(bus);
+        rig.both_read();
+        let before = rig.bus.world().boards[1].version.clone();
+        let dir = std::env::temp_dir().join(format!("xd2joy-layout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("xd2joy_RIGHT.uf2");
+        // linked at 0x26000 (Pro Micro); the XIAO's bootloader starts firmware at 0x27000
+        std::fs::write(&file, uf2(4)).expect("write image");
+        rig.host.send(Effect::Flash { side: Side::Right, file });
+        let e = rig.wait("flash end", |e| matches!(e, HostEvent::Flash(s) if s.is_finished()));
+        assert!(matches!(&e, HostEvent::Flash(FlashStage::Failed { error, .. }) if error.contains("0x27000")), "{e:?}");
+        assert_eq!(rig.bus.world().boards[1].version, before, "nothing was copied");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

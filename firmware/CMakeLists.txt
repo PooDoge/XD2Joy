@@ -11,6 +11,10 @@ if(NOT JC_LEFT)
   list(APPEND EXTRA_CONF_FILE "${CMAKE_CURRENT_LIST_DIR}/usb_name_right.conf")
 endif()
 list(APPEND EXTRA_CONF_FILE "${CMAKE_CURRENT_LIST_DIR}/tx_power.conf")
+# Seeed XIAO nRF52840 / Sense (-b xiao_ble): its own pins, applied last so they win
+if(BOARD MATCHES "^xiao_ble")
+  list(APPEND EXTRA_DTC_OVERLAY_FILE "${CMAKE_CURRENT_LIST_DIR}/xiao.overlay")
+endif()
 
 if(NOT DEFINED JC_OUT)
   set(JC_OUT "${CMAKE_CURRENT_LIST_DIR}/out")

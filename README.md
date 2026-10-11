@@ -58,6 +58,22 @@ consumer friendly version that is in development and is ran on this same firmwar
 
 <img src="DevExample.png" width="500">
 
+### Seeed XIAO nRF52840 / XIAO nRF52840 Sense
+
+The firmware also builds for the XIAO (see [Building](#building), `XD2JOY_BOARD=xiao`). Both
+boards use the same pads, so wire them crosswise:
+
+| Left board (keyboard) | Right board (mouse) |
+|---|---|
+| D6 (TX) | D7 (RX) |
+| D7 (RX) | D6 (TX) |
+| GND | GND |
+
+To enter the bootloader, double-press the small reset button; a drive named **XIAO-SENSE** (on
+the Sense) appears instead of NICENANO. The red LED is the keyboard-mode
+light. The XIAO's bootloader keeps SoftDevice 7.3.0, so its firmware starts at 0x27000 instead of
+the Pro Micro's 0x26000: firmware built for one kind of board does not run on the other.
+
 Make sure the wires make good contact if they touch each other it can feel like a firmware bug with random inputs sent to the console sometimes. Both boards should share the same ground, so if you for whatever reason have them in 2 separate power sources wire them with GND.
 
 ## Dongle vs DIY setup
@@ -152,6 +168,12 @@ ZEPHYR_WORKSPACE=/path/to/zephyrproject bash firmware/build.sh
 If it stops right away with "BT_HCI_LE_INTERVAL_MIN is not 0x0004" after a "No such file or
 directory" line check your `ZEPHYR_WORKSPACE`.
 
+For Seeed XIAO nRF52840 boards (Sense or not):
+
+```sh
+XD2JOY_BOARD=xiao ZEPHYR_WORKSPACE="$PWD/zephyrproject" bash firmware/build.sh
+```
+
 If it worked it should be in `firmware/out/` :
 
 | file | flash it onto |
@@ -174,8 +196,9 @@ image to flash is copied to `firmware/out/`
 
 ## Flashing the firmware
 
-1. **Enter the bootloader:** connect RST and GND at the same time twice quickly
-2. A USB drive named **NICENANO** should appear when its reset.
+1. **Enter the bootloader:** connect RST and GND at the same time twice quickly (on a XIAO,
+   double-press its reset button)
+2. A USB drive named **NICENANO** (**XIAO-SENSE** on a XIAO Sense) should appear when its reset.
 3. Copy the `.uf2` firmware into the boards folder you just reset, once you drag and drop it into the boards bootloader The board restarts running the new firmware.
 
 Do one board at a time both show up as a drive named NICENANO. So try and keep track on what one you reset/flashed and wired correctly.

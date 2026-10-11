@@ -9,7 +9,7 @@ mod uf2;
 
 use std::path::PathBuf;
 
-pub use drive::{BootDrive, BootInfo, copy_image, list_boot_drives, new_drive, scan_mounts};
+pub use drive::{BootDrive, BootInfo, check_layout, copy_image, list_boot_drives, new_drive, scan_mounts};
 pub use uf2::{Uf2Error, Uf2Image};
 
 /// UF2 family id of the nRF52840 (Adafruit's assignment, which the Zephyr `uf2` boards use).
@@ -31,4 +31,9 @@ pub enum FlashError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "this firmware starts at {found:#x}, but {model} (SoftDevice {softdevice}) runs firmware from {board:#x}, \
+         so it was built for another kind of board"
+    )]
+    WrongLayout { found: u32, board: u32, softdevice: String, model: String },
 }

@@ -11,6 +11,8 @@ in any order.
 ## 0. What you need
 
 - Both nRF52840 boards, wired as in the main README, each with its own USB cable to the computer.
+  On Seeed XIAO nRF52840 / Sense boards: left D6 (TX) to right D7 (RX), left D7 (RX) to right D6
+  (TX), and GND to GND.
 - The Bluetooth keyboard and mouse you normally use with them.
 - The Switch 2, for the last checks.
 - Rust 1.88 or newer, from [rustup](https://rustup.rs) (distro packages are often older).
@@ -22,7 +24,8 @@ The same guide, with a system picker and tick boxes, is published as a page:
 
 Nothing is layered onto the host. Build tools go in a distrobox; Rust and Zephyr go in your home
 folder. A distrobox shares your home, `/dev`, `/run/udev` and `/run/media` with the host and keeps
-your user ID, so the box sees the boards and the `NICENANO` drive.
+your user ID, so the box sees the boards and their bootloader drive (`NICENANO`, or `XIAO-SENSE`
+on a XIAO Sense).
 
 On the **host**, once: get the code and give your user access to the boards. The udev rule is a file
 in `/etc`, which stays writable; it also keeps ModemManager away from the boards.
@@ -84,7 +87,8 @@ pip install west
 
 Then follow the main README's Zephyr workspace steps from `git clone …zephyr` onwards, skipping its
 `pip install west cmake ninja` line, with the workspace in your home (`~/zephyrproject`). The
-`NICENANO` drive mounts at `/run/media/$USER/NICENANO` on the host and at the same path in the box.
+bootloader drive mounts at `/run/media/$USER/NICENANO` (or `/run/media/$USER/XIAO-SENSE`) on the
+host and at the same path in the box.
 
 ### Fedora Workstation
 
@@ -173,13 +177,26 @@ The tool needs two console commands that the firmware on this branch adds: `ver`
 
 ```sh
 cd ~/XD2Joy
-ZEPHYR_WORKSPACE=~/zephyrproject bash firmware/build.sh
+ZEPHYR_WORKSPACE=~/zephyrproject bash firmware/build.sh                      # Pro Micro style boards
+XD2JOY_BOARD=xiao ZEPHYR_WORKSPACE=~/zephyrproject bash firmware/build.sh    # Seeed XIAO nRF52840 / Sense
 ```
 
-Flash `firmware/out/xd2joy_LEFT.uf2` and `xd2joy_RIGHT.uf2` the usual way (RST to GND twice, then
-copy the file onto the `NICENANO` drive). Do one board at a time.
+The two builds are not interchangeable: the XIAO's bootloader keeps SoftDevice 7.3.0 and starts
+firmware at 0x27000, the Pro Micro's keeps 6.1.1 and starts it at 0x26000. The build script checks
+this for the XIAO, and the app refuses to copy a file built for the other kind of board.
 
-To test the app's own update path for old firmware instead, skip this step and see section 9.
+Flash `firmware/out/xd2joy_LEFT.uf2` and `xd2joy_RIGHT.uf2` one board at a time:
+
+- **XIAO:** double-press the reset button next to the USB socket. A drive named `XIAO-SENSE`
+  appears. A XIAO with no firmware on it shows that drive as soon as it is plugged in.
+- **Pro Micro / nice!nano:** short RST to GND twice. A drive named `NICENANO` appears.
+
+Copy the file onto the drive. The drive disappears and the board starts the new firmware; some
+systems complain that the drive was removed while copying, which is normal here.
+
+A board needs XD2Joy firmware before the app can see it, so a new board (like a XIAO straight from
+the bag) is always flashed by hand this first time. To try the app's update path for older XD2Joy
+firmware, flash an older build here and update it in section 9.
 
 **Check the new commands work.** In any serial terminal (115200 baud; the baud rate does not
 matter over USB), send `ver` to each board:
@@ -302,12 +319,13 @@ and the ones you changed should keep yours.
 
 | Case | Expected |
 |---|---|
-| Board already runs firmware with `bootloader` | The board restarts, a `NICENANO` drive appears, the file is copied, the board comes back and the card shows the new version. No buttons to press. |
-| Board runs older firmware | The button reads **Update firmware (manual reset)…**. The card asks you to short RST to GND twice on that board, and waits up to 90 seconds. |
+| Board already runs firmware with `bootloader` | The board restarts, its bootloader drive appears, the file is copied, the board comes back and the card shows the new version. No buttons to press. |
+| Board runs older firmware | The button reads **Update firmware (manual reset)…**. The card asks you to double-press the board's reset button (RST to GND twice on a Pro Micro), and waits up to 90 seconds. |
+| Pro Micro build picked for a XIAO (or the other way round) | Refused once the bootloader drive appears, with the two start addresses; nothing is copied. Unplug and replug the board to leave its bootloader. |
 | Wrong file (the RIGHT image on the left board) | Refused before anything happens. |
 | You reset the *other* board by mistake | The app notices and copies nothing. |
 
-Your system must mount `NICENANO` by itself. Desktop Linux, macOS and Windows do.
+Your system must mount the bootloader drive by itself. Desktop Linux, macOS and Windows do.
 
 ## 10. Restore defaults
 
@@ -343,6 +361,9 @@ To start from a clean slate (forget the remembered board configs), delete `board
 
 ## Known unknowns
 
+- The XIAO build has compiled and passed the build script's checks, but has not run on a XIAO yet.
+  The board-link pins (D6/D7) and the USB bridge input (D0) were chosen for this port; the red LED
+  is the keyboard-mode light.
 - The right half's **RS** (stick press) and **GR** masks are inferred, not confirmed. Check both
   on the console in section 5 step 10.
 - The **input** setting (Auto / Bluetooth / USB) only appears on the Boards page for firmware that

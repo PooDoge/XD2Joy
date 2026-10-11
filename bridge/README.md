@@ -36,8 +36,8 @@ work. Bluetooth keeps working too; see [Choosing the input](#choosing-the-input)
 | PA12 (USB D+) | CN10 pin 12 | USB-A breakout D+ |
 | 5V | CN7 pin 18 | USB-A breakout VBUS |
 | GND | CN7 pin 8 (or 19, 20, 22) | USB-A breakout GND |
-| PB6 (USART1 TX) | CN10 pin 17 / Arduino D10 | **left** board P0.08 (marked RX or D0) |
-| PC6 (USART6 TX) | CN10 pin 4 | **right** board P0.08 (marked RX or D0) |
+| PB6 (USART1 TX) | CN10 pin 17 / Arduino D10 | **left** board P0.08 (marked RX or D0); on a Seeed XIAO, pad D0 (P0.02) |
+| PC6 (USART6 TX) | CN10 pin 4 | **right** board P0.08 (marked RX or D0); on a Seeed XIAO, pad D0 (P0.02) |
 | GND | any GND | GND on both nRF boards |
 
 All signals are 3.3 V on both sides, so no level shifting is needed. The

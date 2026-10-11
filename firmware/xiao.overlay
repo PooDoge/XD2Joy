@@ -1,0 +1,68 @@
+/*
+ * Seeed XIAO nRF52840 (and Sense): build with -b xiao_ble.
+ *
+ * Added after left.overlay / right.overlay, so these pins win over the Pro Micro ones there.
+ * Both halves use the same pins on this board:
+ *
+ *   board link (UART0)   TX = D6 (P1.11)   RX = D7 (P1.12)   the pads marked TX and RX
+ *   USB host bridge in   RX = D0 (P0.02)   TX = D1 (P0.03, reserved, nothing reads it yet)
+ *
+ * The Pro Micro bridge pins (P0.06, P0.08) are not on the XIAO's edge, and P0.06 is its blue LED.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+
+&pinctrl {
+	uart0_default: uart0_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 1, 11)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 1, 12)>;
+			bias-pull-up;
+		};
+	};
+
+	uart0_sleep: uart0_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 1, 11)>,
+				<NRF_PSEL(UART_RX, 1, 12)>;
+			low-power-enable;
+		};
+	};
+
+	uart1_default: uart1_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 3)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 2)>;
+			bias-pull-up;
+		};
+	};
+
+	uart1_sleep: uart1_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 3)>,
+				<NRF_PSEL(UART_RX, 0, 2)>;
+			low-power-enable;
+		};
+	};
+};
+
+/* Not used by this firmware; off so their drivers stay out of the image and off the pins. */
+&spi2 {
+	status = "disabled";
+};
+
+&i2c1 {
+	status = "disabled";
+};
+
+&qspi {
+	status = "disabled";
+};
+
+&ieee802154 {
+	status = "disabled";
+};
