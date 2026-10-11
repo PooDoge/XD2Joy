@@ -113,8 +113,8 @@ This port builds, but hasn't been run on hardware yet.
 
 | XIAO RP2040 pad | GPIO | To |
 |---|---|---|
-| D0 | GPIO26 | USB-A socket D+ |
-| D1 | GPIO27 | USB-A socket D− |
+| D7 | GPIO1 | USB-A socket D+ |
+| D8 | GPIO2 | USB-A socket D− |
 | D6 | GPIO0 (UART0 TX) | 1 kΩ, then the **left** nRF board's bridge input (D0 on a XIAO nRF52840) |
 | D9 | GPIO4 (UART1 TX) | 1 kΩ, then the **right** nRF board's bridge input (D0 on a XIAO nRF52840) |
 | GND | | USB-A socket GND, both nRF boards' GND |
