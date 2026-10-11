@@ -65,7 +65,8 @@ impl Connection {
 
     pub fn send(&mut self, command: &Command) -> Result<(), DeviceError> {
         let line = command.encode();
-        tracing::debug!(port = %self.board.port, line = line.trim_end(), "send");
+        // the app logs each command with its board's side; this is for working on this crate alone
+        tracing::trace!(port = %self.board.port, line = line.trim_end(), "send");
         self.writer
             .write_all(line.as_bytes())
             .and_then(|()| self.writer.flush())
@@ -111,7 +112,8 @@ fn read_loop(mut port: Box<dyn SerialPort>, stop: &AtomicBool, name: &str, on_ev
                     on_event(match parse_line(&raw) {
                         Ok(reply) => ConnectionEvent::Line { raw, reply },
                         Err(e) => {
-                            tracing::warn!(port = name, line = %raw, error = %e, "unreadable reply");
+                            // the app logs it (with pairing codes masked) when it handles the event
+                            tracing::trace!(port = name, line = %raw, error = %e, "unreadable reply");
                             ConnectionEvent::Unreadable { raw, error: e.to_string() }
                         }
                     });

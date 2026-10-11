@@ -56,16 +56,19 @@ impl Default for Editor {
 }
 
 impl Editor {
-    /// A config was read from a board. Unapplied edits to that board are kept; otherwise the edit
-    /// follows the board. Returns true when edits were kept although the board changed.
+    /// A config was read from a board. Without unapplied edits to that board the edit follows the
+    /// board. With them, the edits are replayed on what the board now holds (see [`rebase`]), so
+    /// settings the person did not touch take the board's new values instead of writing stale ones
+    /// back. Returns true when edits were kept although the board changed.
     pub fn board_config(&mut self, blob: &ConfigBlob) -> bool {
         let side = blob.side;
         let clean = !self.loaded[side.index()] || self.edit.same_on_board(&self.baseline, side);
         let mut new_baseline = self.baseline.clone();
         new_baseline.read_board(blob);
         let changed = !new_baseline.same_on_board(&self.baseline, side);
-        self.baseline = new_baseline;
+        let old_baseline = std::mem::replace(&mut self.baseline, new_baseline);
         self.loaded[side.index()] = true;
+        tracing::debug!(?side, clean, changed, "config read from board");
         if clean {
             self.edit.read_board(blob);
             if changed {
@@ -76,8 +79,16 @@ impl Editor {
             }
             self.drag = None;
             false
+        } else if changed {
+            self.edit = rebase(&old_baseline, &self.edit, &self.baseline, side);
+            // undo steps hold the board's old settings; stepping back into them would write them
+            self.undo.clear();
+            self.redo.clear();
+            self.drag = None;
+            // after an Apply the read-back is the edit itself: nothing to tell
+            !self.edit.same_on_board(&self.baseline, side)
         } else {
-            changed
+            false
         }
     }
 
@@ -91,6 +102,7 @@ impl Editor {
 
     /// Drop unapplied edits.
     pub fn discard(&mut self) {
+        tracing::debug!("discard edits");
         if self.edit != self.baseline {
             self.push_undo();
             self.edit = self.baseline.clone();
@@ -126,6 +138,7 @@ impl Editor {
         let before = self.edit.clone();
         f(&mut self.edit);
         if self.edit != before && self.drag != Some(what) {
+            tracing::debug!(what, "drag started");
             self.undo.push(before);
             if self.undo.len() > UNDO_DEPTH {
                 self.undo.remove(0);
@@ -150,6 +163,7 @@ impl Editor {
     }
 
     pub fn undo(&mut self) {
+        tracing::debug!(steps = self.undo.len(), "undo");
         self.drag = None;
         if let Some(prev) = self.undo.pop() {
             self.redo.push(std::mem::replace(&mut self.edit, prev));
@@ -157,6 +171,7 @@ impl Editor {
     }
 
     pub fn redo(&mut self) {
+        tracing::debug!(steps = self.redo.len(), "redo");
         self.drag = None;
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.edit, next));
@@ -206,14 +221,6 @@ impl Editor {
         }
     }
 
-    /// A press on a real device: it only means something while a target is waiting for it.
-    pub fn pressed(&mut self, source: Source, mode: BindMode) -> Option<Result<String, String>> {
-        match self.capture {
-            Capture::Source(_) => self.pick_source(source, mode).transpose(),
-            _ => None,
-        }
-    }
-
     pub fn cancel(&mut self) {
         self.capture = Capture::Idle;
     }
@@ -240,6 +247,7 @@ impl Editor {
                 ),
                 other => sentence(&other.to_string()),
             })?;
+        tracing::debug!(?source, ?target, ?mode, ?removed, "bind");
         let mut text = format!("{} now presses {}.", source.label(), target_name(target));
         let old: Vec<String> = removed.iter().filter(|r| r.source == source).map(|r| target_name(r.target)).collect();
         if !old.is_empty() {
@@ -253,11 +261,13 @@ impl Editor {
     }
 
     pub fn unbind(&mut self, b: Binding) {
+        tracing::debug!(?b, "unbind");
         // removing cannot fail
         let _ = self.change(|m| Ok::<bool, ()>(m.remove(b)));
     }
 
     pub fn clear_target(&mut self, target: Target) {
+        tracing::debug!(?target, "clear target");
         let _ = self.change(|m| {
             m.bindings.retain(|b| b.target != target);
             Ok::<(), ()>(())
@@ -265,6 +275,7 @@ impl Editor {
     }
 
     pub fn set_mode_key(&mut self, mode: Mode, key: Option<Hotkey>) {
+        tracing::debug!(?mode, ?key, "mode shortcut");
         let _ = self.change(|m| {
             m.set_mode_key(mode, key);
             Ok::<(), ()>(())
@@ -276,6 +287,118 @@ impl Editor {
 pub fn target_name(t: Target) -> String {
     let half = if t.half() == Side::Left { "left" } else { "right" };
     format!("{} ({half})", t.label())
+}
+
+/// `edit`'s changes from `old` to it on one board, replayed on `new`: bindings added or removed,
+/// and each setting the edit changed. Settings it left alone take `new`'s value. The other board's
+/// half of `edit` is untouched.
+pub fn rebase(old: &Mapping, edit: &Mapping, new: &Mapping, side: Side) -> Mapping {
+    fn pick<T: PartialEq + Clone>(old: &T, edit: &T, new: &T) -> T {
+        if edit == old { new.clone() } else { edit.clone() }
+    }
+    let i = side.index();
+    let on = |b: &&Binding| b.source.board() == side;
+    let (was, now): (Vec<Binding>, Vec<Binding>) =
+        (old.bindings.iter().filter(on).copied().collect(), edit.bindings.iter().filter(on).copied().collect());
+    let mut out = edit.clone();
+    out.bindings.retain(|b| b.source.board() != side);
+    out.bindings.extend(new.bindings.iter().filter(on).filter(|b| !(was.contains(b) && !now.contains(b))).copied());
+    for b in now.iter().filter(|b| !was.contains(b)) {
+        if !out.bindings.contains(b) {
+            out.bindings.push(*b);
+        }
+    }
+    out.colours[i] = pick(&old.colours[i], &edit.colours[i], &new.colours[i]);
+    out.kept[i] = pick(&old.kept[i], &edit.kept[i], &new.kept[i]);
+    match side {
+        Side::Left => {
+            for mode in Mode::ALL {
+                out.set_mode_key(mode, pick(&old.mode_key(mode), &edit.mode_key(mode), &new.mode_key(mode)));
+            }
+        }
+        Side::Right => {
+            let (o, e, n) = (old.tuning, edit.tuning, new.tuning);
+            out.tuning.stick_sens = pick(&o.stick_sens, &e.stick_sens, &n.stick_sens);
+            out.tuning.mouse_gain = pick(&o.mouse_gain, &e.mouse_gain, &n.mouse_gain);
+            out.tuning.accel = pick(&o.accel, &e.accel, &n.accel);
+            out.tuning.stick_deadzone = pick(&o.stick_deadzone, &e.stick_deadzone, &n.stick_deadzone);
+            out.tuning.stick_speed = pick(&o.stick_speed, &e.stick_speed, &n.stick_speed);
+            for a in 0..2 {
+                out.right_stick[a] = pick(&old.right_stick[a], &edit.right_stick[a], &new.right_stick[a]);
+            }
+        }
+    }
+    out
+}
+
+/// What Apply would change on one board, one line per change, for the Advanced page and the log.
+pub fn changes(before: &Mapping, after: &Mapping, side: Side) -> Vec<String> {
+    let mut out = Vec::new();
+    let on_board =
+        |m: &Mapping| -> Vec<Binding> { m.bindings.iter().copied().filter(|b| b.source.board() == side).collect() };
+    let (old, new) = (on_board(before), on_board(after));
+    for b in new.iter().filter(|b| !old.contains(b)) {
+        out.push(format!("+ {} presses {}", b.source.label(), target_name(b.target)));
+    }
+    for b in old.iter().filter(|b| !new.contains(b)) {
+        out.push(format!("- {} no longer presses {}", b.source.label(), target_name(b.target)));
+    }
+    let i = side.index();
+    let (c0, c1) = (before.colours[i], after.colours[i]);
+    for (name, x, y) in [
+        ("body", c0.body, c1.body),
+        ("buttons", c0.buttons, c1.buttons),
+        ("rail", c0.rail, c1.rail),
+        ("stick", c0.stick, c1.stick),
+    ] {
+        if x != y {
+            out.push(format!("colour of the {name}: {x} → {y}"));
+        }
+    }
+    match side {
+        Side::Left => {
+            for mode in Mode::ALL {
+                let (x, y) = (before.mode_key(mode), after.mode_key(mode));
+                if x != y {
+                    let show = |k: Option<Hotkey>| k.map_or("none".to_owned(), |k| k.label());
+                    out.push(format!("{} mode shortcut: {} → {}", mode.label(), show(x), show(y)));
+                }
+            }
+        }
+        Side::Right => {
+            let (t0, t1) = (before.tuning, after.tuning);
+            for (name, x, y) in [
+                ("pointer speed", t0.mouse_gain, t1.mouse_gain),
+                ("stick sensitivity", t0.stick_sens, t1.stick_sens),
+                ("anti-deadzone", t0.stick_deadzone, t1.stick_deadzone),
+                ("stick speed", t0.stick_speed, t1.stick_speed),
+            ] {
+                if x != y {
+                    out.push(format!("{name}: {x} → {y}"));
+                }
+            }
+            if t0.accel != t1.accel {
+                out.push(format!("acceleration: {} → {}", on_off(t0.accel), on_off(t1.accel)));
+            }
+            for (axis, x, y) in [
+                ("left/right", before.right_stick[0], after.right_stick[0]),
+                ("up/down", before.right_stick[1], after.right_stick[1]),
+            ] {
+                if x != y {
+                    out.push(format!("right stick {axis} in stick mode: {} → {}", x.label(), y.label()));
+                }
+            }
+        }
+    }
+    if before.kept[i] != after.kept[i] {
+        // entries the app does not model (from a preset or a pasted blob), written back as they are
+        out.push("settings this app does not show (unknown entries, stick gain)".to_owned());
+    }
+    out
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
 }
 
 fn sentence(s: &str) -> String {
@@ -353,6 +476,47 @@ mod tests {
     }
 
     #[test]
+    fn edits_made_offline_are_replayed_on_what_the_board_now_holds() {
+        let mut e = loaded();
+        let _ = e.bind(Source::Key(0x59), Target::Button(Button::Zl), BindMode::Add);
+        e.tweak("gain", |m| m.tuning.mouse_gain = 300);
+        // meanwhile the boards were changed elsewhere: new colours on the left, stick speed on the right
+        let mut left = e.baseline.to_blob(Side::Left).expect("blob");
+        left.colours.body = xd2joy_proto::Rgb([9, 9, 9]);
+        let mut other = e.baseline.clone();
+        other.tuning.stick_speed = 7;
+        let right = other.to_blob(Side::Right).expect("blob");
+        assert!(e.board_config(&left));
+        assert!(e.board_config(&right));
+        assert_eq!(e.edit.colours[0].body, xd2joy_proto::Rgb([9, 9, 9]), "untouched setting follows the board");
+        assert_eq!(e.edit.tuning.stick_speed, 7);
+        assert_eq!(e.edit.tuning.mouse_gain, 300, "the edit is kept");
+        assert!(e.edit.bindings.contains(&Binding { source: Source::Key(0x59), target: Target::Button(Button::Zl) }));
+    }
+
+    #[test]
+    fn reading_back_an_apply_is_not_a_change_underneath() {
+        let mut e = loaded();
+        e.tweak("gain", |m| m.tuning.mouse_gain = 300);
+        let written = e.edit.to_blob(Side::Right).expect("blob");
+        assert!(!e.board_config(&written));
+        assert!(!e.dirty(Side::Right));
+    }
+
+    #[test]
+    fn changes_are_listed_per_board() {
+        let mut e = loaded();
+        let _ = e.bind(Source::Key(0x59), Target::Button(Button::Zl), BindMode::Add);
+        e.tweak("gain", |m| m.tuning.mouse_gain = 300);
+        let left = changes(&e.baseline, &e.edit, Side::Left);
+        assert_eq!(left.len(), 1);
+        assert!(left[0].starts_with("+ ") && left[0].contains("ZL"), "{left:?}");
+        assert_eq!(changes(&e.baseline, &e.edit, Side::Right), vec!["pointer speed: 420 → 300".to_owned()]);
+        e.discard();
+        assert!(changes(&e.baseline, &e.edit, Side::Left).is_empty());
+    }
+
+    #[test]
     fn a_drag_is_one_undo_step() {
         let mut e = loaded();
         for v in [300, 400, 500] {
@@ -417,8 +581,6 @@ mod tests {
         assert_eq!(e.pick_source(s2, BindMode::Add), Ok(None));
         assert!(e.pick_target(t, BindMode::Add).is_ok_and(|m| m.is_some()));
         assert_eq!(e.edit.sources_of(t).count(), 2);
-        // a device press only counts while a target waits
-        assert_eq!(e.pressed(Source::Key(0x48), BindMode::Move), None);
     }
 
     #[test]

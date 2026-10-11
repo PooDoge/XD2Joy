@@ -10,7 +10,7 @@ mod editor;
 use std::{collections::VecDeque, path::PathBuf};
 
 pub use board::{BoardView, Firmware, Link, PairState, pairing_tip};
-pub use editor::{BindMode, Capture, Editor, NamedHotkey, conflicts, target_name};
+pub use editor::{BindMode, Capture, Editor, NamedHotkey, changes, conflicts, target_name};
 use xd2joy_device::ConnectionEvent;
 use xd2joy_proto::raw::{LiveInput, Pressed};
 use xd2joy_proto::{
@@ -54,6 +54,13 @@ pub enum Effect {
         slot: Slot,
         name: String,
     },
+    /// Store a preset's configs in a slot without changing what the boards run (unless the slot
+    /// is the active one). One config per connected board.
+    ProfileFromPreset {
+        slot: Slot,
+        name: String,
+        blobs: Vec<ConfigBlob>,
+    },
     ProfileKey {
         slot: Slot,
         key: Option<Hotkey>,
@@ -72,6 +79,25 @@ pub enum Effect {
         name: String,
     },
     Unpin(Side),
+}
+
+impl Effect {
+    /// One line for the log. A config is shown as the hex `cfg` takes, so a log can be replayed.
+    pub fn summary(&self) -> String {
+        match self {
+            Effect::ProfileFromPreset { slot, name, blobs } => format!(
+                "ProfileFromPreset slot={} name={name:?} blobs={}",
+                slot.number(),
+                blobs.iter().map(|b| b.to_hex().unwrap_or_else(|e| format!("<{e}>"))).collect::<Vec<_>>().join(",")
+            ),
+            Effect::Apply { side, blob, save_slot, .. } => format!(
+                "Apply {side:?} save_slot={:?} blob={}",
+                save_slot.map(Slot::number),
+                blob.to_hex().unwrap_or_else(|e| format!("<{e}>"))
+            ),
+            other => format!("{other:?}"),
+        }
+    }
 }
 
 /// Everything the host tells the window.
@@ -112,6 +138,8 @@ pub enum HostEvent {
         side: Side,
         on: bool,
     },
+    /// The window was asked to close while something would be lost; it stays open once.
+    CloseRefused(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +302,20 @@ pub struct Model {
     pub outbox: Vec<Effect>,
     /// Text being typed into fields, kept here so it survives page changes.
     pub drafts: Drafts,
+    /// When each board's remembered config was read, for a board edited while unplugged.
+    pub cached: [Option<u64>; 2],
+    /// A modifier pressed while a Joy-Con button waits; it binds on release unless a key follows.
+    pub pending_modifier: Option<PendingModifier>,
+}
+
+/// A modifier waiting for its release, with what it would bind to and where it was pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingModifier {
+    pub bits: u8,
+    /// The capture it was pressed in; if that ended or moved to another button, it binds nothing.
+    pub capture: Capture,
+    /// Pressed on this computer's keyboard rather than the board's; only that keyboard releases it.
+    pub from_pc: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -282,9 +324,46 @@ pub struct Drafts {
     pub profile_names: [String; 4],
     /// The Advanced page's blob field.
     pub blob_hex: String,
+    /// Typed values on the Stick & mouse page: pointer speed, sensitivity, anti-deadzone, speed.
+    pub tuning: [String; 4],
+    /// Hex colours typed on the Colours page, by half and part (body, buttons, rail, stick).
+    pub colours: [[String; 4]; 2],
+    /// The values `tuning` and `colours` were typed over. When the values change some other way
+    /// (a slider, undo, a board read), the typed text is stale and dropped.
+    basis: Option<(xd2joy_proto::mapping::Tuning, [xd2joy_proto::blob::Colours; 2])>,
+}
+
+impl Drafts {
+    /// Typed values that are still about the current values, for showing in their fields.
+    pub fn fresh(&self, map: &xd2joy_proto::Mapping) -> bool {
+        self.basis == Some((map.tuning, map.colours))
+    }
 }
 
 impl Model {
+    /// For writing a typed value: drops stale text first, so typing starts from an empty field.
+    pub fn value_drafts(&mut self) -> &mut Drafts {
+        let now = (self.editor.edit.tuning, self.editor.edit.colours);
+        if self.drafts.basis != Some(now) {
+            self.drafts.tuning = Default::default();
+            self.drafts.colours = Default::default();
+            self.drafts.basis = Some(now);
+        }
+        &mut self.drafts
+    }
+}
+
+impl Model {
+    /// Start from the configs remembered from the last time each board was connected.
+    pub fn load_cached(&mut self, cached: [Option<crate::cache::Cached>; 2]) {
+        for c in cached.into_iter().flatten() {
+            let side = c.blob.side;
+            tracing::info!(?side, read_at = c.read_at, "using the remembered config until the board connects");
+            self.editor.board_config(&c.blob);
+            self.cached[side.index()] = Some(c.read_at);
+        }
+    }
+
     pub fn board(&self, side: Side) -> &BoardView {
         &self.boards[side.index()]
     }
@@ -310,30 +389,98 @@ impl Model {
         }
     }
 
+    /// Show a notice. Every notice is logged, so a log shows what the person was told.
     pub fn info(&mut self, text: impl Into<String>) {
-        self.notice = Some(Notice::Info(text.into()));
+        let text = text.into();
+        tracing::info!(notice = %text, "shown");
+        self.notice = Some(Notice::Info(text));
     }
 
     pub fn error(&mut self, text: impl Into<String>) {
-        self.notice = Some(Notice::Error(text.into()));
+        let text = text.into();
+        tracing::warn!(notice = %text, "shown");
+        self.notice = Some(Notice::Error(text));
     }
 
     /// The effects that write every board with unapplied changes.
     pub fn apply_effects(&self) -> Result<Vec<Effect>, String> {
         let mut out = Vec::new();
         for side in Side::BOTH {
-            if !self.editor.dirty(side) {
+            if !self.editor.dirty(side) || !self.board(side).writable() {
                 continue;
             }
             let b = self.board(side);
-            if !b.writable() {
-                return Err(format!("The {} board isn't connected, so its changes can't be applied.", side_word(side)));
-            }
             let blob = self.editor.edit.to_blob(side).map_err(|e| e.to_string())?;
             let save_slot = b.profiles.active_saved().and_then(Slot::new);
             out.push(Effect::Apply { side, blob, expected: b.config.clone(), save_slot });
         }
-        Ok(out)
+        match self.waiting_for_board().as_slice() {
+            [] => Ok(out),
+            [side, ..] if out.is_empty() => Err(self.why_not_writable(*side).unwrap_or_default()),
+            _ => Ok(out),
+        }
+    }
+
+    /// Why the tool can't write a board's settings now, as a sentence; `None` when it can.
+    pub fn why_not_writable(&self, side: Side) -> Option<String> {
+        let b = self.board(side);
+        let word = side_word(side);
+        if b.writable() {
+            None
+        } else if !b.connected() {
+            Some(format!("The {word} board isn't connected. Your changes to it are kept; apply them once it is."))
+        } else if b.firmware.newer_than_tool() {
+            Some(format!(
+                "The {word} board runs firmware newer than this app, so the app only reads it. Update the app to \
+                 change its settings."
+            ))
+        } else {
+            Some(format!(
+                "The {word} board's config hasn't been read yet. Your changes are kept; Apply again in a moment, or \
+                 replug the board if this stays."
+            ))
+        }
+    }
+
+    /// A preset file's configs for each connected board, built on what the boards hold now (not on
+    /// unapplied edits), for filling a profile slot.
+    pub fn preset_blobs(&self, json: &str) -> Result<Vec<ConfigBlob>, String> {
+        let mut map = self.editor.baseline.clone();
+        xd2joy_proto::preset::apply(json, &mut map).map_err(|e| format!("That preset can't be used: {e}"))?;
+        let blobs: Vec<ConfigBlob> = Side::BOTH
+            .into_iter()
+            .filter(|&s| self.board(s).writable())
+            .map(|s| map.to_blob(s).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        if blobs.is_empty() {
+            return Err("Connect a board first.".into());
+        }
+        Ok(blobs)
+    }
+
+    /// What closing the window now would lose, if anything.
+    pub fn close_warning(&self) -> Option<String> {
+        if let Some(stage) = self.flash.as_ref().filter(|s| !s.is_finished()) {
+            return Some(format!(
+                "The {} board's firmware is being updated. Stopping now leaves it in its bootloader until it is \
+                 updated again.",
+                side_word(stage.side())
+            ));
+        }
+        if let Some(job) = &self.working {
+            return Some(format!("{job} is still running."));
+        }
+        let dirty: Vec<&str> = Side::BOTH.into_iter().filter(|&s| self.editor.dirty(s)).map(side_word).collect();
+        match dirty.as_slice() {
+            [] => None,
+            [one] => Some(format!("The {one} board has unapplied changes.")),
+            _ => Some("Both boards have unapplied changes.".to_owned()),
+        }
+    }
+
+    /// Boards with unapplied changes that can't be written now (unplugged, or still being read).
+    pub fn waiting_for_board(&self) -> Vec<Side> {
+        Side::BOTH.into_iter().filter(|&s| self.editor.dirty(s) && !self.board(s).writable()).collect()
     }
 
     /// The shortcuts the boards know, with names, for conflict checks.
@@ -397,6 +544,7 @@ impl Model {
                 self.log(None, &text);
                 self.error(text);
             }
+            HostEvent::CloseRefused(reason) => self.error(format!("{reason} Close the window again to quit anyway.")),
             HostEvent::Scanning { side, on } => {
                 let b = self.board_mut(side);
                 b.scanning = on;
@@ -434,12 +582,16 @@ impl Model {
                 }
                 if let Some(blob) = self.board_mut(side).take(&reply)
                     && blob.side == side
-                    && self.editor.board_config(&blob)
                 {
-                    self.info(format!(
-                        "The {} board's mapping changed on the board (a profile switch?). Your unapplied changes were kept.",
-                        side_word(side)
-                    ));
+                    // read live now; the remembered copy no longer matters
+                    self.cached[side.index()] = None;
+                    if self.editor.board_config(&blob) {
+                        self.info(format!(
+                            "The {} board's mapping changed on the board (a profile switch?). Your unapplied \
+                             changes were kept; settings you did not touch now show what the board holds.",
+                            side_word(side)
+                        ));
+                    }
                 }
             }
             ConnectionEvent::Unreadable { raw, error } => self.log(Some(side), format!("{raw}  ({error})")),
@@ -472,7 +624,6 @@ impl Model {
                 });
             }
         }
-        let mode = self.bind_mode();
         let presses = self.live.feed(side, r);
         if self.hotkey_capture.is_some() && side == Side::Left {
             let mods = self.live.held_mods();
@@ -492,10 +643,49 @@ impl Model {
                 Pressed::Wheel(WheelDir::Up) => Source::Wheel(WheelDir::Up),
                 Pressed::Wheel(WheelDir::Down) => Source::Wheel(WheelDir::Down),
             };
-            match self.editor.pressed(source, mode) {
-                Some(Ok(text)) => self.info(text),
-                Some(Err(text)) => self.error(text),
-                None => {}
+            self.capture_press(source, false);
+        }
+        if side == Side::Left {
+            let held = self.live.held_mods();
+            self.capture_release(held, false);
+        }
+    }
+
+    /// A key or button pressed on a device while a Joy-Con button waits for one. A modifier waits
+    /// for its release: Shift then K binds K (bindings ignore modifiers), Shift alone binds Shift.
+    pub fn capture_press(&mut self, source: Source, from_pc: bool) {
+        if !matches!(self.editor.capture, Capture::Source(_)) {
+            self.pending_modifier = None;
+            return;
+        }
+        if let Source::Modifiers(bits) = source {
+            self.pending_modifier = Some(PendingModifier { bits, capture: self.editor.capture, from_pc });
+            return;
+        }
+        self.pending_modifier = None;
+        let mode = self.bind_mode();
+        match self.editor.pick_source(source, mode) {
+            Ok(Some(text)) => self.info(text),
+            Ok(None) => {}
+            Err(text) => self.error(text),
+        }
+    }
+
+    /// Modifiers still held after a report or a key release: a waiting modifier let go without
+    /// another key binds now.
+    pub fn capture_release(&mut self, still_held: u8, from_pc: bool) {
+        let Some(pending) = self.pending_modifier else { return };
+        if pending.from_pc != from_pc || still_held & pending.bits != 0 {
+            return;
+        }
+        self.pending_modifier = None;
+        let bits = pending.bits;
+        if self.editor.capture == pending.capture && matches!(self.editor.capture, Capture::Source(_)) {
+            let mode = self.bind_mode();
+            match self.editor.pick_source(Source::Modifiers(bits), mode) {
+                Ok(Some(text)) => self.info(text),
+                Ok(None) => {}
+                Err(text) => self.error(text),
             }
         }
     }
@@ -505,28 +695,65 @@ impl Model {
     /// A shortcut was recorded: store it where it belongs. Mode shortcuts are part of the mapping
     /// (applied with the rest); profile and unpair shortcuts are sent at once.
     pub fn finish_hotkey(&mut self, key: Hotkey) {
-        let Some(target) = self.hotkey_capture.take() else { return };
-        let all: Vec<NamedHotkey> = self.hotkeys();
-        let clash = all.iter().find(|h| {
-            let own = match target {
-                HotkeyFor::Mode(m) => h.what == format!("{} mode", m.label()),
-                HotkeyFor::Profile(s) => h.what == format!("Profile {}", s.number()),
-                HotkeyFor::Unpair => false,
-            };
-            !own && h.key.clashes(key)
-        });
-        if let Some(h) = clash {
-            self.error(format!("{} is already the {} shortcut.", key.label(), h.what));
+        let Some(target) = self.hotkey_capture else { return };
+        // A refused key keeps the recording going, so another key can be pressed straight away.
+        if let Err(why) = self.hotkey_allowed(target, key) {
+            self.error(format!("{why} Press another key, or Esc."));
             return;
         }
+        self.hotkey_capture = None;
         match target {
             HotkeyFor::Mode(mode) => {
                 self.editor.set_mode_key(mode, Some(key));
                 self.info(format!("{} toggles {} mode once applied.", key.label(), mode.label()));
             }
             HotkeyFor::Profile(slot) => self.outbox.push(Effect::ProfileKey { slot, key: Some(key) }),
-            HotkeyFor::Unpair => self.outbox.push(Effect::SyncKey(Some(Hotkey { key: key.key, mods: 0 }))),
+            HotkeyFor::Unpair => {
+                let bare = Hotkey { key: key.key, mods: 0 };
+                if key.mods != 0 {
+                    self.info(format!("The unpair key takes no modifiers, so it is {}.", bare.label()));
+                }
+                self.outbox.push(Effect::SyncKey(Some(bare)));
+            }
         }
+    }
+
+    /// Why `key` can't be the shortcut for `target`, if it can't.
+    fn hotkey_allowed(&self, target: HotkeyFor, key: Hotkey) -> Result<(), String> {
+        let own = |h: &NamedHotkey| match target {
+            HotkeyFor::Mode(m) => h.what == format!("{} mode", m.label()),
+            HotkeyFor::Profile(s) => h.what == format!("Profile {}", s.number()),
+            HotkeyFor::Unpair => false,
+        };
+        let others: Vec<NamedHotkey> = self.hotkeys().into_iter().filter(|h| !own(h)).collect();
+        match target {
+            // Held 2 s, the unpair key fires whatever else is held, so only the key itself counts.
+            HotkeyFor::Unpair => {
+                if let Some(h) = others.iter().find(|h| h.key.key == key.key) {
+                    return Err(format!("{} is part of the {} shortcut.", h.key.label(), h.what));
+                }
+                let presses: Vec<String> = self.editor.edit.targets_of(Source::Key(key.key)).map(target_name).collect();
+                if !presses.is_empty() {
+                    return Err(format!(
+                        "{} presses {}; holding it in a game would unpair the console.",
+                        Hotkey { key: key.key, mods: 0 }.label(),
+                        presses.join(" and ")
+                    ));
+                }
+            }
+            _ => {
+                if let Some(h) = others.iter().find(|h| h.key.clashes(key)) {
+                    return Err(format!("{} is already the {} shortcut.", key.label(), h.what));
+                }
+                if self.sync_key().is_some_and(|s| s.key == key.key) {
+                    return Err(format!(
+                        "{} is the console unpair key; holding it 2 seconds unpairs.",
+                        Hotkey { key: key.key, mods: 0 }.label()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The second press of a dangerous button: true when it should go ahead.
@@ -693,6 +920,34 @@ mod tests {
     }
 
     #[test]
+    fn a_connected_board_applies_while_the_other_waits() {
+        let mut m = with_configs();
+        let _ = m.editor.bind(Source::Wheel(WheelDir::Up), Target::Button(Button::X), BindMode::Add);
+        let _ = m.editor.bind(Source::Key(0x59), Target::Button(Button::Zl), BindMode::Add);
+        m.apply(HostEvent::Disconnected { side: Side::Right });
+        let fx = m.apply_effects().expect("left applies");
+        assert!(matches!(fx.as_slice(), [Effect::Apply { side: Side::Left, .. }]));
+        assert_eq!(m.waiting_for_board(), vec![Side::Right]);
+    }
+
+    #[test]
+    fn a_remembered_config_can_be_edited_before_the_board_connects() {
+        let mut m = Model::default();
+        let mut right = ConfigBlob::firmware_default(Side::Right);
+        right.stick_gain = right.stick_gain.wrapping_add(7);
+        m.load_cached([None, Some(crate::cache::Cached { blob: right.clone(), read_at: 1, firmware: None })]);
+        assert_eq!(m.cached, [None, Some(1)]);
+        let r = m.editor.bind(Source::Wheel(WheelDir::Up), Target::Button(Button::X), BindMode::Add);
+        assert!(r.is_ok(), "{r:?}");
+        assert!(m.editor.dirty(Side::Right));
+        // the board connects holding the same config: the edit stays and can be applied
+        m.apply(HostEvent::Connected { side: Side::Right, port: "/dev/ttyR".into() });
+        m.apply(line_on(Side::Right, &format!("[CFG] blob {}", right.to_hex().expect("hex"))));
+        assert!(m.editor.dirty(Side::Right));
+        assert_eq!(m.apply_effects().map(|fx| fx.len()), Ok(1));
+    }
+
+    #[test]
     fn edits_for_an_absent_board_cannot_be_applied() {
         let mut m = with_configs();
         let _ = m.editor.bind(Source::Wheel(WheelDir::Up), Target::Button(Button::X), BindMode::Add);
@@ -712,6 +967,57 @@ mod tests {
         let _ = m.editor.pick_target(Target::Button(Button::Home), BindMode::Move);
         m.apply(line_on(Side::Right, "[RAW] h=0x0020 len=4: 04 00 00 00"));
         assert!(m.editor.edit.has_home());
+    }
+
+    #[test]
+    fn a_modifier_waits_for_release_unless_a_key_follows() {
+        let mut m = with_configs();
+        let t = Target::Button(Button::Capture);
+        // Shift then K on the board: K is bound
+        let _ = m.editor.pick_target(t, BindMode::Move);
+        m.apply(line("[RAW] h=0x0012 len=8: 02 00 00 00 00 00 00 00"));
+        assert_eq!(m.editor.capture, Capture::Source(t));
+        m.apply(line("[RAW] h=0x0012 len=8: 02 00 0E 00 00 00 00 00"));
+        assert_eq!(m.editor.edit.sources_of(t).collect::<Vec<_>>(), vec![Source::Key(0x0E)]);
+        // Shift alone, released: Shift is bound
+        m.apply(line("[RAW] h=0x0012 len=8: 00 00 00 00 00 00 00 00"));
+        let _ = m.editor.pick_target(t, BindMode::Move);
+        m.apply(line("[RAW] h=0x0012 len=8: 02 00 00 00 00 00 00 00"));
+        m.apply(line("[RAW] h=0x0012 len=8: 00 00 00 00 00 00 00 00"));
+        assert_eq!(m.editor.edit.sources_of(t).collect::<Vec<_>>(), vec![Source::Modifiers(0x02)]);
+        assert_eq!(m.editor.capture, Capture::Idle);
+        // Shift held, then another button picked: releasing Shift binds nothing to either
+        let other = Target::Button(Button::Plus);
+        let before: Vec<Source> = m.editor.edit.sources_of(other).collect();
+        let _ = m.editor.pick_target(t, BindMode::Move);
+        m.apply(line("[RAW] h=0x0012 len=8: 02 00 00 00 00 00 00 00"));
+        let _ = m.editor.pick_target(other, BindMode::Move);
+        m.apply(line("[RAW] h=0x0012 len=8: 00 00 00 00 00 00 00 00"));
+        assert_eq!(m.editor.capture, Capture::Source(other));
+        assert_eq!(m.editor.edit.sources_of(other).collect::<Vec<_>>(), before);
+        // a computer-keyboard Shift is not released by a board report
+        m.capture_press(Source::Modifiers(0x02), true);
+        m.apply(line("[RAW] h=0x0012 len=8: 00 00 00 00 00 00 00 00"));
+        assert!(m.pending_modifier.is_some());
+        m.capture_release(0, true);
+        assert_eq!(m.editor.edit.sources_of(other).collect::<Vec<_>>(), vec![Source::Modifiers(0x02)]);
+    }
+
+    #[test]
+    fn the_unpair_key_refuses_shortcut_keys_and_bound_keys() {
+        let mut m = with_configs();
+        m.hotkey_capture = Some(HotkeyFor::Unpair);
+        // K is in the Ctrl+K keyboard mode shortcut
+        m.finish_hotkey(Hotkey { key: 0x0E, mods: 0 });
+        assert!(matches!(&m.notice, Some(Notice::Error(t)) if t.contains("Keyboard mode")));
+        assert_eq!(m.hotkey_capture, Some(HotkeyFor::Unpair), "still recording");
+        // Space presses B by default
+        m.finish_hotkey(Hotkey { key: 0x2C, mods: 0 });
+        assert!(matches!(&m.notice, Some(Notice::Error(t)) if t.contains("unpair the console")));
+        // F11 is free; modifiers are dropped
+        m.finish_hotkey(Hotkey { key: 0x44, mods: 0x01 });
+        assert_eq!(m.outbox, vec![Effect::SyncKey(Some(Hotkey { key: 0x44, mods: 0 }))]);
+        assert_eq!(m.hotkey_capture, None);
     }
 
     #[test]

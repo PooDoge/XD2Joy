@@ -35,6 +35,9 @@ pub struct FakeBoard {
     pub heard: Vec<ScanDevice>,
     /// The commands it received, for tests.
     pub received: Vec<String>,
+    /// Command lines equal to one of these are lost on the way in, as when the firmware drops
+    /// bytes mid-command (for tests).
+    pub deaf: Vec<&'static str>,
 }
 
 impl FakeBoard {
@@ -57,6 +60,7 @@ impl FakeBoard {
             pin: None,
             heard: demo_devices(side),
             received: Vec::new(),
+            deaf: Vec::new(),
         }
     }
 
@@ -97,6 +101,9 @@ impl FakeBoard {
     fn handle(&mut self, line: &str) -> (Vec<String>, Option<LinkMsg>) {
         self.received.push(line.to_owned());
         let c = line.trim_start_matches(' ');
+        if self.deaf.iter().any(|d| c.trim_end() == *d) {
+            return (Vec::new(), None);
+        }
         let mut out = Vec::new();
         let mut link = None;
         let num = |s: &str| -> Option<u32> {

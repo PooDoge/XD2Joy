@@ -15,11 +15,16 @@ use super::mapper::{self, Looks};
 use super::{danger_button, muted, panel, row};
 use crate::{
     host::HostHandle,
+    logs,
     model::{
-        BoardView, Effect, Firmware, FlashStage, HotkeyFor, Link, Model, PairState, conflicts, pairing_tip, side_word,
+        BoardView, Effect, Firmware, FlashStage, HotkeyFor, Link, Model, PairState, changes, conflicts, pairing_tip,
+        side_word,
     },
     theme::*,
 };
+
+/// What a field shows when its typed text is stale.
+static NO_TEXT: String = String::new();
 
 fn side_title(side: Side) -> impl IntoElement {
     row()
@@ -289,8 +294,74 @@ fn profile_row(
                     Effect::ProfileClear(slot),
                     host,
                 )),
-        );
+        )
+        .child(fill_from_preset(model, m, slot, saved, ok && !dirty, host));
     panel
+}
+
+/// Fill a slot from a preset file without touching what the boards run now. A saved slot needs a
+/// second press first, like the other overwrites.
+fn fill_from_preset(
+    mut model: State<Model>,
+    m: &Model,
+    slot: Slot,
+    saved: bool,
+    enabled: bool,
+    host: &HostHandle,
+) -> Button {
+    let id = format!("fill profile {}", slot.number());
+    let armed = m.armed.as_deref() == Some(id.as_str());
+    let host = host.clone();
+    Button::new()
+        .enabled(enabled)
+        .on_press(move |_| {
+            if saved && !model.write().confirm(&id) {
+                return;
+            }
+            let host = host.clone();
+            spawn_forever(async move {
+                let Some(file) =
+                    rfd::AsyncFileDialog::new().set_title("Preset for the profile").add_filter("Preset", &["json"]).pick_file().await
+                else {
+                    return;
+                };
+                let text = match read_preset(file.path()) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        model.write().error(e);
+                        return;
+                    }
+                };
+                let name: String = file
+                    .path()
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().replace(['_', '-'], " "))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(xd2joy_proto::PROFILE_NAME_MAX)
+                    .collect();
+                let blobs = model.read().preset_blobs(&text);
+                match blobs {
+                    Ok(blobs) => {
+                        tracing::info!(slot = slot.number(), file = %file.path().display(), "filling profile from preset");
+                        host.send(Effect::ProfileFromPreset { slot, name, blobs });
+                    }
+                    Err(e) => model.write().error(e),
+                }
+            });
+        })
+        .child(if armed { "Press again to overwrite it".to_owned() } else { "Fill from preset file…".to_owned() })
+}
+
+/// Presets are a few kilobytes; anything far bigger is not one.
+const PRESET_MAX_BYTES: u64 = 1 << 20;
+
+fn read_preset(path: &std::path::Path) -> Result<String, String> {
+    let size = std::fs::metadata(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?.len();
+    if size > PRESET_MAX_BYTES {
+        return Err(format!("{} is {size} bytes; a preset is a few kilobytes.", path.display()));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("Could not read {}: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -410,8 +481,10 @@ fn from_percent(p: f64, r: &std::ops::RangeInclusive<u16>) -> u16 {
         .clamp(f64::from(*r.start()), f64::from(*r.end())) as u16
 }
 
+#[allow(clippy::too_many_arguments)]
 fn slider_row(
     mut model: State<Model>,
+    field: usize,
     name: &'static str,
     help: &'static str,
     value: u16,
@@ -421,20 +494,51 @@ fn slider_row(
 ) -> impl IntoElement {
     let step = 100. / f64::from(range.end() - range.start());
     let r = range.clone();
+    let typed = range.clone();
+    let bounds = format!("{} to {} in the board's units, Enter to set", range.start(), range.end());
+    let draft = Writable::from_state(model).map(
+        move |m| if m.drafts.fresh(&m.editor.edit) { &m.drafts.tuning[field] } else { &NO_TEXT },
+        move |m| &mut m.value_drafts().tuning[field],
+    );
     rect()
         .width(Size::fill())
         .spacing(4.)
         .child(row().child(label().text(name).width(Size::px(200.))).child(label().text(shown).color(ACCENT)))
         .child(
-            Slider::new(move |p: f64| {
-                let v = from_percent(p, &r);
-                model.write().editor.tweak(name, |map| set(&mut map.tuning, v));
-            })
-            .value(percent(value, &range))
-            .step(step)
-            .size(Size::px(420.)),
+            row()
+                .child(
+                    Slider::new(move |p: f64| {
+                        let v = from_percent(p, &r);
+                        model.write().editor.tweak(name, |map| set(&mut map.tuning, v));
+                    })
+                    .value(percent(value, &range))
+                    .step(step)
+                    .size(Size::px(420.)),
+                )
+                .child(Input::new(draft).placeholder(value.to_string()).width(Size::px(80.)).on_submit(
+                    move |text: String| {
+                        let mut m = model.write();
+                        match parse_in_range(&text, &typed) {
+                            Ok(v) => {
+                                let _ = m.editor.change(|map| {
+                                    set(&mut map.tuning, v);
+                                    Ok::<(), ()>(())
+                                });
+                                m.drafts.tuning[field].clear();
+                            }
+                            Err(e) => m.error(format!("{name}: {e}")),
+                        }
+                    },
+                ))
+                .child(muted(bounds)),
         )
         .child(muted(help))
+}
+
+/// A whole number within `range`, as typed.
+fn parse_in_range(text: &str, range: &std::ops::RangeInclusive<u16>) -> Result<u16, String> {
+    let v: u16 = text.trim().parse().map_err(|_| format!("\"{}\" isn't a whole number.", text.trim()))?;
+    if range.contains(&v) { Ok(v) } else { Err(format!("{v} is outside {} to {}.", range.start(), range.end())) }
 }
 
 pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl IntoElement {
@@ -453,6 +557,7 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
             panel("Mouse (Joy-Con mouse mode)")
                 .child(slider_row(
                     model,
+                    0,
                     "Pointer speed",
                     "How far the Switch pointer moves for a mouse movement.",
                     t.mouse_gain,
@@ -479,6 +584,7 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
             panel("Stick mode (the mouse moves the right stick)")
                 .child(slider_row(
                     model,
+                    1,
                     "Sensitivity",
                     "How much stick a mouse movement gives. Stops getting stronger above 10.",
                     t.stick_sens,
@@ -488,6 +594,7 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
                 ))
                 .child(slider_row(
                     model,
+                    2,
                     "Anti-deadzone",
                     "Skips the stick's dead centre so small movements register in games. The number in brackets is the web tool's scale.",
                     t.stick_deadzone,
@@ -497,6 +604,7 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
                 ))
                 .child(slider_row(
                     model,
+                    3,
                     "Return speed",
                     "How fast the stick follows the mouse and settles back.",
                     t.stick_speed,
@@ -579,22 +687,38 @@ pub fn colours(model: State<Model>, m: &Model) -> impl IntoElement {
 
 fn colour_card(mut model: State<Model>, m: &Model, half: Side, looks: &Looks) -> impl IntoElement {
     let c = m.editor.edit.colours[half.index()];
+    let on_board = m.editor.baseline.colours[half.index()];
     let i = half.index();
-    let part = move |name: &'static str, value: Rgb, set: fn(&mut Colours, Rgb)| {
-        let what: &'static str = match (half, name) {
-            (Side::Left, "Body") => "colour L body",
-            (Side::Left, "Buttons") => "colour L buttons",
-            (Side::Left, "Rail") => "colour L rail",
-            (Side::Left, _) => "colour L stick",
-            (Side::Right, "Body") => "colour R body",
-            (Side::Right, "Buttons") => "colour R buttons",
-            (Side::Right, "Rail") => "colour R rail",
-            (Side::Right, _) => "colour R stick",
-        };
+    let part = move |j: usize, name: &'static str, value: Rgb, set: fn(&mut Colours, Rgb)| {
+        const WHAT: [[&str; 4]; 2] = [
+            ["colour L body", "colour L buttons", "colour L rail", "colour L stick"],
+            ["colour R body", "colour R buttons", "colour R rail", "colour R stick"],
+        ];
+        let what = WHAT[i][j];
+        let draft = Writable::from_state(model).map(
+            move |m| if m.drafts.fresh(&m.editor.edit) { &m.drafts.colours[i][j] } else { &NO_TEXT },
+            move |m| &mut m.value_drafts().colours[i][j],
+        );
         row()
             .key(name)
             .child(label().text(name).width(Size::px(70.)))
-            .child(label().text(value.to_string()).width(Size::px(80.)).font_family("monospace"))
+            .child(Input::new(draft).placeholder(value.to_string()).width(Size::px(100.)).on_submit(
+                move |text: String| {
+                    let mut m = model.write();
+                    match Rgb::parse(&text) {
+                        Some(rgb) => {
+                            let _ = m.editor.change(|map| {
+                                set(&mut map.colours[i], rgb);
+                                Ok::<(), ()>(())
+                            });
+                            m.drafts.colours[i][j].clear();
+                        }
+                        None => {
+                            m.error(format!("\"{}\" isn't a colour; type six hex digits, like #1E1E1E.", text.trim()))
+                        }
+                    }
+                },
+            ))
             .child(
                 ColorPicker::new(move |col: Color| {
                     model.write().editor.tweak(what, |map| set(&mut map.colours[i], from_color(col)));
@@ -617,21 +741,72 @@ fn colour_card(mut model: State<Model>, m: &Model, half: Side, looks: &Looks) ->
             row().child(mapper::joycon(model, m, half, looks, false)).child(
                 rect()
                     .spacing(8.)
-                    .child(part("Body", c.body, |c, v| c.body = v))
-                    .child(part("Buttons", c.buttons, |c, v| c.buttons = v))
-                    .child(part("Rail", c.rail, |c, v| c.rail = v))
-                    .child(part("Stick", c.stick, |c, v| c.stick = v)),
+                    .child(part(0, "Body", c.body, |c, v| c.body = v))
+                    .child(part(1, "Buttons", c.buttons, |c, v| c.buttons = v))
+                    .child(part(2, "Rail", c.rail, |c, v| c.rail = v))
+                    .child(part(3, "Stick", c.stick, |c, v| c.stick = v))
+                    .child(muted("Type a hex colour and press Enter, or pick one.")),
             ),
         )
-        .child(row().child(Button::new().on_press(set_all(Colours::stock(half))).child("Stock")).children(
-            PRESETS.iter().map(|&(name, body, buttons)| {
-                let mut colours = c;
-                colours.body = Rgb(body);
-                colours.buttons = Rgb(buttons);
-                colours.rail = Rgb(body);
-                Button::new().key(name).on_press(set_all(colours)).child(name).into_element()
-            }),
-        ))
+        .child(
+            row()
+                .child(Button::new().on_press(set_all(Colours::stock(half))).child("Stock"))
+                .child(
+                    Button::new()
+                        .enabled(m.editor.loaded[i] && c != on_board)
+                        .on_press(set_all(on_board))
+                        .child("As on the board"),
+                )
+                .child(
+                    Button::new()
+                        .on_press(move |_| {
+                            let colours = random_colours(random_seed());
+                            let _ = model.write().editor.change(|map| {
+                                map.colours[i] = colours;
+                                Ok::<(), ()>(())
+                            });
+                        })
+                        .child("Random"),
+                ),
+        )
+        .child(row().children(PRESETS.iter().map(|&(name, body, buttons)| {
+            let mut colours = c;
+            colours.body = Rgb(body);
+            colours.buttons = Rgb(buttons);
+            colours.rail = Rgb(body);
+            Button::new().key(name).on_press(set_all(colours)).child(name).into_element()
+        })))
+}
+
+fn random_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    // RandomState is seeded randomly per instance; no dependency needed for a colour
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64));
+    h.finish()
+}
+
+/// A bright body from the seed's hue, with dark buttons, a matching rail and a lighter stick.
+fn random_colours(seed: u64) -> Colours {
+    let hue = (seed % 360) as f32;
+    let body = hsv(hue, 0.75 + (seed >> 16 & 0xFF) as f32 / 1020., 0.85);
+    Colours { body, buttons: Rgb([0x1E, 0x1E, 0x1E]), rail: body, stick: hsv(hue, 0.35, 0.95) }
+}
+
+fn hsv(h: f32, s: f32, v: f32) -> Rgb {
+    let c = v * s;
+    let x = c * (1. - ((h / 60.) % 2. - 1.).abs());
+    let (r, g, b) = match (h / 60.) as u32 {
+        0 => (c, x, 0.),
+        1 => (x, c, 0.),
+        2 => (0., c, x),
+        3 => (0., x, c),
+        4 => (x, 0., c),
+        _ => (c, 0., x),
+    };
+    let m = v - c;
+    let to = |f: f32| ((f + m) * 255.).round().clamp(0., 255.) as u8;
+    Rgb([to(r), to(g), to(b)])
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -817,14 +992,29 @@ pub fn advanced(model: State<Model>, m: &Model, host: &HostHandle) -> impl IntoE
             panel("Config blobs")
                 .child(muted("What Apply would write, as the hex `cfg set` takes. Paste a blob below to load it into the editor."))
                 .children(blobs.into_iter().map(|(s, hex)| {
+                    let changed = changes(&m.editor.baseline, &m.editor.edit, s);
+                    let read = m.board(s).config.is_some() || m.cached[s.index()].is_some();
                     rect()
                         .key(s.letter().to_string())
                         .spacing(2.)
-                        .child(muted(s.label()))
+                        .child(
+                            row().child(muted(s.label())).maybe_child(hex.as_ref().ok().map(|h| {
+                                let h = h.clone();
+                                Button::new().on_press(move |_| copy(model, h.clone(), "config blob")).child("Copy")
+                            })),
+                        )
                         .child(match hex {
                             Ok(h) => label().text(h).font_family("monospace").font_size(TEXT_SMALL),
                             Err(e) => label().text(e).color(DANGER),
                         })
+                        .child(match (read, changed.is_empty()) {
+                            (false, _) => muted("Not read from the board yet, so there is nothing to compare with."),
+                            (true, true) => muted("Same as on the board."),
+                            (true, false) => muted(format!("Apply would change {} thing(s):", changed.len())),
+                        })
+                        .children(changed.into_iter().enumerate().map(|(i, line)| {
+                            label().key(i).text(line).font_family("monospace").font_size(TEXT_SMALL).into_element()
+                        }))
                         .into_element()
                 }))
                 .child(
@@ -834,6 +1024,7 @@ pub fn advanced(model: State<Model>, m: &Model, host: &HostHandle) -> impl IntoE
                 ),
         )
         .child(raw_panel(m))
+        .child(log_panel())
         .child(
             panel("Console")
                 .child(
@@ -852,6 +1043,50 @@ pub fn advanced(model: State<Model>, m: &Model, host: &HostHandle) -> impl IntoE
                     ),
                 ),
         )
+}
+
+fn log_panel() -> impl IntoElement {
+    match logs::dir() {
+        None => panel("Log files").child(muted(
+            "This run is not writing a log file (see the terminal for why). Set XD2JOY_LOG_DIR to pick a folder.",
+        )),
+        Some(dir) => {
+            let shown = dir.display().to_string();
+            let (open_dir, copy_dir) = (dir.to_path_buf(), shown.clone());
+            panel("Log files")
+                .child(muted(format!(
+                    "Every command sent to the boards, every answer, every notice and every edit is written to a \
+                     dated file here, kept for {} days. Attach the newest one to a bug report.",
+                    logs::KEEP_DAYS
+                )))
+                .child(label().text(shown).font_family("monospace").font_size(TEXT_SMALL))
+                .child(
+                    row()
+                        .child(Button::new().on_press(move |_| open_folder(&open_dir)).child("Open log folder"))
+                        .child(Button::new().on_press(move |_| copy_path(&copy_dir)).child("Copy path")),
+                )
+        }
+    }
+}
+
+fn open_folder(dir: &std::path::Path) {
+    tracing::info!(dir = %dir.display(), "opening log folder");
+    if let Err(e) = open::that_detached(dir) {
+        tracing::warn!(dir = %dir.display(), error = %e, "could not open log folder");
+    }
+}
+
+fn copy_path(path: &str) {
+    if let Err(e) = Clipboard::set(path.to_owned()) {
+        tracing::warn!(error = ?e, "could not copy to the clipboard");
+    }
+}
+
+fn copy(mut model: State<Model>, text: String, what: &str) {
+    match Clipboard::set(text) {
+        Ok(()) => model.write().info(format!("Copied the {what}.")),
+        Err(e) => model.write().error(format!("Could not copy the {what}: {e:?}")),
+    }
 }
 
 fn raw_panel(m: &Model) -> impl IntoElement {
@@ -907,10 +1142,10 @@ fn open_preset(mut model: State<Model>, host: HostHandle) {
         else {
             return;
         };
-        let text = match std::fs::read_to_string(file.path()) {
+        let text = match read_preset(file.path()) {
             Ok(t) => t,
             Err(e) => {
-                model.write().error(format!("Could not read {}: {e}", file.path().display()));
+                model.write().error(e);
                 return;
             }
         };
@@ -960,18 +1195,31 @@ fn diagnostics(m: &Model) -> String {
         let hex = b.config.as_ref().and_then(|c| c.to_hex().ok()).unwrap_or_else(|| "not read".into());
         let _ = writeln!(out, "config: {hex}\n");
     }
-    out.push_str("== Console ==\n");
-    for line in &m.log {
-        // a pairing code is only good once, but there is no reason to hand it out
-        if line.to_ascii_lowercase().contains("passkey") {
-            out.extend(line.chars().map(|c| if c.is_ascii_digit() { '*' } else { c }));
-        } else {
-            out.push_str(line);
+    out.push_str("== Unapplied changes ==\n");
+    for side in Side::BOTH {
+        for line in changes(&m.editor.baseline, &m.editor.edit, side) {
+            let _ = writeln!(out, "{}: {line}", side.letter());
         }
+    }
+    out.push_str("\n== Console ==\n");
+    for line in &m.log {
+        out.push_str(&logs::mask_passkeys(line));
         out.push('\n');
+    }
+    out.push_str("\n== Log file (last lines) ==\n");
+    let mut out = logs::mask_passkeys(&out);
+    out.push('\n');
+    match logs::tail(LOG_TAIL) {
+        Ok(t) => out.push_str(&logs::mask_passkeys(&t)),
+        Err(e) => {
+            let _ = writeln!(out, "({e})");
+        }
     }
     out
 }
+
+/// Lines of the log file copied into the diagnostics file.
+const LOG_TAIL: usize = 500;
 
 fn save_diagnostics(mut model: State<Model>) {
     let text = diagnostics(&model.read());
@@ -994,6 +1242,24 @@ fn save_diagnostics(mut model: State<Model>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_colours_are_bright_with_dark_buttons() {
+        for seed in [0, 59, 61, 179, 359, 12345, u64::MAX] {
+            let c = random_colours(seed);
+            assert!(c.body.0.iter().any(|&v| v > 150), "{seed}: {}", c.body);
+            assert_eq!(c.buttons, Rgb([0x1E, 0x1E, 0x1E]));
+        }
+        assert_eq!(hsv(0., 1., 1.), Rgb([255, 0, 0]));
+        assert_eq!(hsv(120., 1., 1.), Rgb([0, 255, 0]));
+    }
+
+    #[test]
+    fn typed_numbers_must_be_whole_and_in_range() {
+        assert_eq!(parse_in_range(" 420 ", &MOUSE_GAIN), Ok(420));
+        assert!(parse_in_range("4.5", &MOUSE_GAIN).is_err());
+        assert!(parse_in_range("5", &MOUSE_GAIN).is_err_and(|e| e.contains("outside 10 to 1000")));
+    }
 
     #[test]
     fn slider_positions_round_trip_every_value() {

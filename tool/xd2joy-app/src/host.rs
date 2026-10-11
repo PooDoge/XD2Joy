@@ -12,7 +12,7 @@
 
 use std::{
     collections::VecDeque,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
@@ -26,6 +26,7 @@ use xd2joy_proto::{
     CfgReply, Command, ConfigBlob, FirmwareInfo, PROTO_VERSION, PeerReply, ProfileReply, Reply, Side, Slot,
 };
 
+use crate::logs;
 use crate::model::{Effect, FlashStage, HostEvent, side_word};
 
 const SCAN_EVERY: Duration = Duration::from_millis(500);
@@ -58,6 +59,10 @@ pub trait Bus: Send + 'static {
     fn open(&mut self, board: &BoardPort, on_event: LineSink) -> Result<Box<dyn BoardLink>, String>;
     fn boot_drives(&mut self) -> Vec<BootDrive>;
     fn copy(&mut self, drive: &Path, image: &Uf2Image) -> Result<(), String>;
+    /// Where each board's last config is remembered; `None` remembers nothing (tests, the demo).
+    fn cache_file(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// The real thing: USB serial ports and mounted UF2 drives.
@@ -70,6 +75,10 @@ impl BoardLink for Connection {
 }
 
 impl Bus for SerialBus {
+    fn cache_file(&self) -> Option<PathBuf> {
+        crate::cache::path()
+    }
+
     fn list(&mut self) -> Result<Vec<BoardPort>, String> {
         list_boards().map_err(|e| e.to_string())
     }
@@ -129,6 +138,7 @@ pub fn start(bus: impl Bus, sink: Sink) -> std::io::Result<HostHandle> {
         failed: Vec::new(),
         warned_duplicate: [false, false],
         deferred: VecDeque::new(),
+        hidden: [false; 2],
         skipped: None,
         timers: Vec::new(),
     };
@@ -161,12 +171,22 @@ struct Host<B: Bus> {
     /// A board `on_all` skipped because it was not connected, for the job's message.
     skipped: Option<Side>,
     timers: Vec<(Instant, Timer)>,
+    /// Boards temporarily holding a config the person did not choose (a preset being saved into a
+    /// slot): their config reads are not shown to the window or remembered on disk.
+    hidden: [bool; 2],
 }
 
 type Job<T = ()> = Result<T, String>;
 
 impl<B: Bus> Host<B> {
     fn emit(&self, event: HostEvent) {
+        log_event(&event);
+        if let HostEvent::Board { side, event: ConnectionEvent::Line { reply: Reply::Cfg(CfgReply::Blob(_)), .. } } =
+            &event
+            && self.hidden[side.index()]
+        {
+            return;
+        }
         (self.sink)(event);
     }
 
@@ -351,6 +371,7 @@ impl<B: Bus> Host<B> {
     fn request(&mut self, side: Side, cmd: Command) -> Job<Outcome> {
         let i = side.index();
         let live = self.live[i].as_mut().ok_or_else(|| not_connected(side))?;
+        tracing::debug!(?side, line = %cmd.encode().trim_end(), "send");
         live.link.send(&cmd)?;
         live.inflight = Some(Exchange::new(cmd, Instant::now()));
         loop {
@@ -359,6 +380,11 @@ impl<B: Bus> Host<B> {
             if let Some(outcome) = ex.poll(now) {
                 if let Some(l) = self.live[i].as_mut() {
                     l.inflight = None;
+                }
+                match &outcome {
+                    Outcome::Answered(r) => tracing::debug!(?side, lines = r.len(), "answered"),
+                    Outcome::Silent => tracing::debug!(?side, "no answer expected"),
+                    Outcome::TimedOut(r) => tracing::warn!(?side, lines = r.len(), "command timed out"),
                 }
                 return Ok(outcome);
             }
@@ -406,7 +432,10 @@ impl<B: Bus> Host<B> {
                 Reply::Cfg(CfgReply::Blob(b)) => Some(b),
                 _ => None,
             }) {
-                Some(Ok(blob)) if blob.side == side => return Ok(blob),
+                Some(Ok(blob)) if blob.side == side => {
+                    self.remember(&blob);
+                    return Ok(blob);
+                }
                 Some(Ok(_)) => {
                     return Err(format!(
                         "The {} board holds a config for the other side. Restore its defaults.",
@@ -418,6 +447,19 @@ impl<B: Bus> Host<B> {
             }
         }
         Err(format!("Couldn't read the {} board's config ({last}).", side_word(side)))
+    }
+
+    fn remember(&self, blob: &ConfigBlob) {
+        if self.hidden[blob.side.index()] {
+            return;
+        }
+        let Some(file) = self.bus.cache_file() else { return };
+        let firmware =
+            self.live[blob.side.index()].as_ref().and_then(|l| l.firmware.as_ref()).map(|f| f.version.clone());
+        // losing the cache only costs editing while unplugged, so it is logged, not shown
+        if let Err(e) = crate::cache::save(&file, blob, firmware.as_deref()) {
+            tracing::warn!(error = %e, "could not remember the board's config");
+        }
     }
 
     fn live_sides(&self) -> Vec<Side> {
@@ -454,6 +496,7 @@ impl<B: Bus> Host<B> {
     }
 
     fn effect(&mut self, effect: Effect) {
+        tracing::info!(effect = %effect.summary(), "request from the window");
         match effect {
             Effect::SetMode(side, mode) => self.job("Switching mode", |h| {
                 h.run_cmd(side, Command::Mode(Some(mode)))?;
@@ -487,6 +530,18 @@ impl<B: Bus> Host<B> {
                     Ok(())
                 })?;
                 Ok(Some(format!("Saved the current mapping as profile {}.", slot.number())))
+            }),
+            Effect::ProfileFromPreset { slot, name, blobs } => self.job("Filling the profile from the preset", |h| {
+                let skipped: Vec<Side> =
+                    Side::BOTH.into_iter().filter(|s| !blobs.iter().any(|b| b.side == *s)).collect();
+                let mut done = h.profile_from_preset(slot, &name, &blobs)?;
+                if let Some(s) = skipped.first() {
+                    done.push_str(&format!(
+                        " The {} board wasn't connected, so its half of the profile is unchanged.",
+                        side_word(*s)
+                    ));
+                }
+                Ok(Some(done))
             }),
             Effect::ProfileRename { slot, name } => self.job("Renaming the profile", |h| {
                 h.on_all(|h, side| h.run_cmd(side, Command::ProfileName(slot, name.clone())).map(drop))?;
@@ -591,19 +646,7 @@ impl<B: Bus> Host<B> {
                 side_word(side)
             ));
         }
-        let cmd = Command::cfg_write(blob).map_err(|e| e.to_string())?;
-        // An unanswered write may still have landed; the read-back below decides.
-        let replies = self.run_cmd(side, cmd).unwrap_or_default();
-        if let Some(why) = replies.iter().find_map(|r| match r {
-            Reply::Cfg(CfgReply::WriteError(why)) => Some(why),
-            _ => None,
-        }) {
-            return Err(format!("The {} board refused it: {why}.", side_word(side)));
-        }
-        let back = self.read_cfg(side)?;
-        if back != *blob {
-            return Err(format!("The {} board stored something other than what was sent.", side_word(side)));
-        }
+        self.write_cfg(side, blob)?;
         let mut done = format!("Applied to the {} board.", side_word(side));
         if let Some(slot) = save {
             let r = self.run_cmd(side, Command::ProfileSave(slot))?;
@@ -616,6 +659,92 @@ impl<B: Bus> Host<B> {
             done = format!("Applied to the {} board and saved to profile {}.", side_word(side), slot.number());
         }
         Ok(done)
+    }
+
+    /// Write a config and read it back.
+    fn write_cfg(&mut self, side: Side, blob: &ConfigBlob) -> Job {
+        let cmd = Command::cfg_write(blob).map_err(|e| e.to_string())?;
+        // An unanswered write may still have landed; the read-back below decides.
+        let replies = match self.run_cmd(side, cmd) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?side, error = %e, "config write unanswered; checking what the board holds");
+                Vec::new()
+            }
+        };
+        if let Some(why) = replies.iter().find_map(|r| match r {
+            Reply::Cfg(CfgReply::WriteError(why)) => Some(why),
+            _ => None,
+        }) {
+            return Err(format!("The {} board refused it: {why}.", side_word(side)));
+        }
+        let back = self.read_cfg(side)?;
+        if back != *blob {
+            return Err(format!("The {} board stored something other than what was sent.", side_word(side)));
+        }
+        Ok(())
+    }
+
+    /// Put a preset into a profile slot on each board it has a config for, then give the board
+    /// back what it was running, unless that slot is the active one.
+    fn profile_from_preset(&mut self, slot: Slot, name: &str, blobs: &[ConfigBlob]) -> Job<String> {
+        // checked up front, so a board that cannot be written does not leave the other half done
+        for blob in blobs {
+            self.may_write(blob.side)?;
+        }
+        let mut filled: Vec<Side> = Vec::new();
+        for blob in blobs {
+            let side = blob.side;
+            if let Err(e) = self.fill_one(side, slot, name, blob) {
+                return Err(match filled.as_slice() {
+                    [] => e,
+                    done => {
+                        format!("{e} The {} board's profile {} was already filled.", side_word(done[0]), slot.number())
+                    }
+                });
+            }
+            filled.push(side);
+        }
+        Ok(format!("Profile {} now holds the preset \"{name}\".", slot.number()))
+    }
+
+    /// Save `blob` into `slot` on one board: write it, `profile save`, then put back what the board
+    /// was running unless `slot` is the active profile (whose saved copy the board loads at boot
+    /// anyway). The put-back is attempted whatever failed before it.
+    fn fill_one(&mut self, side: Side, slot: Slot, name: &str, blob: &ConfigBlob) -> Job {
+        let original = self.read_cfg(side)?;
+        let table = self.run_cmd(side, Command::Profiles)?;
+        let Some(active) = table.iter().find_map(|r| match r {
+            Reply::Profile(ProfileReply::Active(n)) => Some(*n),
+            _ => None,
+        }) else {
+            // guessing wrong here would leave the board on the preset after a restart
+            return Err(format!("The {} board did not say which profile is active; nothing changed.", side_word(side)));
+        };
+        let keep = active == slot.number();
+        self.hidden[side.index()] = !keep;
+        let stored = self.write_cfg(side, blob).and_then(|()| self.run_cmd(side, Command::ProfileSave(slot)));
+        let restored = if keep { Ok(()) } else { self.write_cfg(side, &original) };
+        self.hidden[side.index()] = false;
+        if keep || restored.is_err() {
+            // the board now runs a config the window has not seen: show and remember it
+            if let Err(e) = self.read_cfg(side) {
+                tracing::warn!(?side, error = %e, "read after filling a profile");
+            }
+        }
+        let stuck =
+            || format!(" The {} board is now running the preset; Apply or switch profile to fix it.", side_word(side));
+        let saved = match (stored, restored) {
+            (Ok(r), Ok(())) => slot_saved(&r, slot),
+            (Err(e), Ok(())) => return Err(e),
+            (Ok(_), Err(e)) => return Err(format!("{e}{}", stuck())),
+            (Err(e), Err(_)) => return Err(format!("{e}{}", stuck())),
+        };
+        if !saved {
+            return Err(format!("The {} board did not save profile {}.", side_word(side), slot.number()));
+        }
+        self.run_cmd(side, Command::ProfileName(slot, name.to_owned()))?;
+        Ok(())
     }
 
     fn restore(&mut self, side: Side) -> Job<String> {
@@ -704,6 +833,7 @@ impl<B: Bus> Host<B> {
         let wait = if can_restart {
             // the board leaves USB before it can answer; send it and stop listening
             if let Some(live) = self.live[side.index()].as_mut() {
+                tracing::debug!(?side, line = %Command::Bootloader.encode().trim_end(), "send");
                 live.link.send(&Command::Bootloader)?;
             }
             self.drop_connection(side);
@@ -761,6 +891,38 @@ impl<B: Bus> Host<B> {
                     .into());
             }
         }
+    }
+}
+
+/// One log line per event, at a level that matches how much it matters later.
+fn log_event(event: &HostEvent) {
+    match event {
+        HostEvent::Board { side, event: ConnectionEvent::Line { raw, reply } } => {
+            if matches!(reply, Reply::Raw(_)) {
+                tracing::trace!(?side, line = %raw, "recv");
+            } else {
+                tracing::debug!(?side, line = %logs::mask_passkeys(raw), "recv");
+            }
+        }
+        HostEvent::Board { side, event: ConnectionEvent::Unreadable { raw, error } } => {
+            tracing::warn!(?side, line = %logs::mask_passkeys(raw), %error, "unreadable line");
+        }
+        HostEvent::Board { side, event: ConnectionEvent::Lost(why) } => tracing::warn!(?side, %why, "connection lost"),
+        HostEvent::Connected { side, port } => tracing::info!(?side, %port, "board connected"),
+        HostEvent::ConnectFailed { side, port, error } => tracing::warn!(?side, %port, %error, "could not open board"),
+        HostEvent::Disconnected { side } => tracing::info!(?side, "board disconnected"),
+        HostEvent::NoVersion { side } => tracing::warn!(?side, "no answer to ver: firmware older than this app"),
+        HostEvent::Duplicate { side, ignored } => tracing::warn!(?side, %ignored, "second board for one side ignored"),
+        HostEvent::Flash(stage) => match stage {
+            FlashStage::Failed { .. } => tracing::warn!(side = ?stage.side(), stage = %stage.describe(), "update"),
+            _ => tracing::info!(side = ?stage.side(), stage = %stage.describe(), "update"),
+        },
+        HostEvent::Working(Some(job)) => tracing::info!(%job, "job started"),
+        HostEvent::Working(None) => tracing::debug!("job finished"),
+        HostEvent::Done(text) => tracing::info!(%text, "job done"),
+        HostEvent::Failed(text) => tracing::warn!(%text, "job failed"),
+        HostEvent::Scanning { side, on } => tracing::info!(?side, on, "bluetooth search"),
+        HostEvent::CloseRefused(_) => {}
     }
 }
 
@@ -925,6 +1087,58 @@ mod tests {
         for side in Side::BOTH {
             assert!(rig.received(side).iter().filter(|l| *l == "cfg").count() >= 2);
         }
+    }
+
+    #[test]
+    fn a_preset_fills_a_slot_without_changing_what_the_board_runs() {
+        let rig = Rig::new(FakeBus::new());
+        rig.both_read();
+        let running = rig.bus.world().boards[0].live.clone();
+        let mut preset = ConfigBlob::firmware_default(Side::Left);
+        preset.colours.body = xd2joy_proto::Rgb([1, 2, 3]);
+        let slot = Slot::new(3).expect("slot");
+        rig.host.send(Effect::ProfileFromPreset { slot, name: "Racing".into(), blobs: vec![preset.clone()] });
+        let e = rig.wait("fill result", done);
+        assert!(
+            matches!(&e, HostEvent::Done(t) if t.contains("Profile 3") && t.contains("right board wasn't")),
+            "{e:?}"
+        );
+        let world = rig.bus.world();
+        assert_eq!(world.boards[0].live, running, "the board runs what it ran before");
+        assert_eq!(world.boards[0].slots[2].as_ref(), Some(&preset));
+        assert_eq!(world.boards[0].names[2], "Racing");
+    }
+
+    #[test]
+    fn a_lost_profile_save_still_puts_back_what_the_board_ran() {
+        let rig = Rig::new(FakeBus::new());
+        rig.both_read();
+        let running = rig.bus.world().boards[0].live.clone();
+        rig.bus.world().boards[0].deaf.push("profile save 3");
+        let mut preset = ConfigBlob::firmware_default(Side::Left);
+        preset.colours.body = xd2joy_proto::Rgb([1, 2, 3]);
+        let slot = Slot::new(3).expect("slot");
+        rig.host.send(Effect::ProfileFromPreset { slot, name: "Racing".into(), blobs: vec![preset] });
+        let e = rig.wait("fill result", done);
+        assert!(matches!(e, HostEvent::Failed(_)), "{e:?}");
+        let world = rig.bus.world();
+        assert_eq!(world.boards[0].live, running);
+        assert_eq!(world.boards[0].slots[2], None);
+    }
+
+    #[test]
+    fn filling_a_profile_needs_to_know_the_active_one() {
+        let rig = Rig::new(FakeBus::new());
+        rig.both_read();
+        let running = rig.bus.world().boards[0].live.clone();
+        rig.bus.world().boards[0].deaf.push("profile");
+        let slot = Slot::new(3).expect("slot");
+        let preset = ConfigBlob::firmware_default(Side::Left);
+        rig.host.send(Effect::ProfileFromPreset { slot, name: "Racing".into(), blobs: vec![preset] });
+        let e = rig.wait("fill result", done);
+        assert!(matches!(e, HostEvent::Failed(_)), "{e:?}");
+        assert_eq!(rig.bus.world().boards[0].live, running);
+        assert_eq!(rig.bus.world().boards[0].slots[2], None);
     }
 
     #[test]

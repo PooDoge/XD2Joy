@@ -26,13 +26,39 @@ cd tool
 cargo run -p xd2joy                 # with real boards
 XD2JOY_DEMO=1 cargo run -p xd2joy   # with simulated boards, for working on the window
 XD2JOY_DEMO=1 XD2JOY_PAGE=Colours cargo run -p xd2joy   # open on a page
-XD2JOY_LOG=debug cargo run -p xd2joy
+XD2JOY_LOG=trace cargo run -p xd2joy   # also log every raw keyboard and mouse report
 ```
 
 On Linux you need `libudev-dev` and the GL/EGL/Wayland development packages (see
 `.github/workflows/tool.yml`). To use the boards without joining `dialout` (or `uucp` on Arch), and
 to keep ModemManager away from them, install `packaging/70-xd2joy.rules` (instructions are in the
 file).
+
+## Logs and remembered configs
+
+Every run writes a log file, one per day, kept for 14 days. It records every command sent to a
+board and every line it printed back, every job (Apply, profile switches, updates) and how it
+ended, every notice the window showed, every edit to the mapping, and panics with a backtrace.
+Pairing codes are masked, in the log and in the diagnostics file; Bluetooth addresses and device
+names are not.
+The **Advanced** page shows the folder and opens it.
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Logs | `~/.local/share/xd2joy/logs` | `~/Library/Application Support/xd2joy/logs` | `%LOCALAPPDATA%\xd2joy\logs` |
+| Board configs | `~/.config/xd2joy/boards.json` | `~/Library/Application Support/xd2joy/boards.json` | `%APPDATA%\xd2joy\boards.json` |
+
+The board configs file holds the last config read from each board, so a board's half of the
+mapping can be edited while it is unplugged; the edits are applied when it is plugged in again.
+Deleting the file only loses that.
+
+| Variable | Effect |
+|---|---|
+| `XD2JOY_LOG` | Filter for both the terminal and the file, in `tracing` syntax (`debug`, `trace`, `xd2joy::host=trace`) |
+| `XD2JOY_LOG_DIR` | Folder for log files |
+| `XD2JOY_CACHE` | Path of the board configs file |
+| `XD2JOY_DEMO` | Run with simulated boards (the board configs file is not read or written) |
+| `XD2JOY_PAGE` | Open on a page by its name |
 
 ## Updating firmware
 

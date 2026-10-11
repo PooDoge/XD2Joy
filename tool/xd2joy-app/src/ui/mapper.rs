@@ -113,23 +113,41 @@ fn header(mut model: State<Model>, m: &Model) -> impl IntoElement {
                 .child(count(Side::Left))
                 .child(count(Side::Right)),
         )
-        .children(Side::BOTH.into_iter().filter(|s| !m.editor.loaded[s.index()]).map(|s| {
-            label()
-                .key(s.letter().to_string())
-                .text(format!(
-                    "The {} board isn't connected, so its {} bindings are shown as the built-in defaults and can't be \
-                     changed.",
-                    crate::model::side_word(s),
-                    if s == Side::Left { "keyboard" } else { "mouse" }
-                ))
-                .color(WARN)
-                .into_element()
+        .children(Side::BOTH.into_iter().filter_map(|s| board_note(m, s)).map(|(s, text)| {
+            label().key(s.letter().to_string()).text(text).color(WARN).into_element()
         }))
         .maybe_child((!m.editor.edit.has_home()).then(|| {
             label()
                 .text("Nothing presses HOME. The right board wakes a sleeping Switch when HOME is held, so bind it to something.")
                 .color(WARN)
         }))
+}
+
+/// Why a board's half can't be edited, or is being edited from a remembered config.
+fn board_note(m: &Model, s: Side) -> Option<(Side, String)> {
+    if m.board(s).connected() {
+        return m.why_not_writable(s).map(|why| (s, why));
+    }
+    let word = crate::model::side_word(s);
+    let what = if s == Side::Left { "keyboard" } else { "mouse" };
+    Some((
+        s,
+        match (m.editor.loaded[s.index()], m.cached[s.index()]) {
+            (false, _) => format!(
+                "The {word} board isn't connected, so its {what} bindings are shown as the built-in defaults and \
+                 can't be changed."
+            ),
+            (true, Some(at)) => format!(
+                "The {word} board isn't connected. Its {what} bindings are as it was last read ({}); changes are \
+                 kept and can be applied once it is plugged in.",
+                crate::cache::date(at)
+            ),
+            (true, None) => format!(
+                "The {word} board isn't connected; changes to its {what} bindings can be applied once it is \
+                 plugged in again."
+            ),
+        },
+    ))
 }
 
 /// The half's colour, for chips and tints.

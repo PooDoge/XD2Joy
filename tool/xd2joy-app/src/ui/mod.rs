@@ -45,6 +45,10 @@ pub struct Root {
     pub host: HostHandle,
     pub inbox: Handoff<UnboundedReceiver<HostEvent>>,
     pub start_page: Page,
+    /// Each board's config from the last time it was connected.
+    pub cached: Handoff<[Option<crate::cache::Cached>; 2]>,
+    /// Told on every render what closing would lose.
+    pub close: crate::close::CloseGuard,
 }
 
 /// Send whatever the model queued for the host.
@@ -58,7 +62,14 @@ impl App for Root {
     fn render(&self) -> impl IntoElement {
         use_init_theme(dark_theme);
         let start_page = self.start_page;
-        let mut model = use_state(move || Model { page: start_page, ..Model::default() });
+        let cached = self.cached.clone();
+        let mut model = use_state(move || {
+            let mut m = Model { page: start_page, ..Model::default() };
+            if let Some(c) = cached.take() {
+                m.load_cached(c);
+            }
+            m
+        });
         use_hook({
             let inbox = self.inbox.clone();
             let host = self.host.clone();
@@ -83,6 +94,7 @@ impl App for Root {
         let host = self.host.clone();
         let key_host = self.host.clone();
         let m = model.read();
+        self.close.set_reason(m.close_warning());
         rect()
             .width(Size::fill())
             .height(Size::fill())
@@ -131,6 +143,9 @@ fn page(model: State<Model>, m: &Model, host: &HostHandle) -> Element {
 fn key_down(mut model: State<Model>, host: &HostHandle, e: &KeyboardEventData) {
     let usage = hid::usage_from_code_name(&e.code.to_string());
     let mut m = model.write();
+    // A modifier released while the window had no focus never sends key-up; the event's own
+    // modifier state corrects that.
+    m.pc_mods &= held_mask(e.modifiers);
     if let Some(bit) = usage.and_then(hid::Modifier::from_usage).map(hid::Modifier::bit) {
         m.pc_mods |= bit;
     }
@@ -143,8 +158,8 @@ fn key_down(mut model: State<Model>, host: &HostHandle, e: &KeyboardEventData) {
             m.finish_hotkey(xd2joy_proto::Hotkey { key: u, mods });
             flush(&mut m, host);
         } else if usage.is_none() {
-            m.error("That key has no USB code the boards know. Try another one.");
-            m.hotkey_capture = None;
+            // keep recording: Fn and media keys never reach the boards, so another key is needed
+            m.error("That key never reaches the boards (Fn and media keys don't). Press another one, or Esc.");
         }
         return;
     }
@@ -152,15 +167,10 @@ fn key_down(mut model: State<Model>, host: &HostHandle, e: &KeyboardEventData) {
         Capture::Source(_) if escape => m.editor.cancel(),
         Capture::Source(_) => {
             let Some(u) = usage else {
-                m.error("That key has no USB code the boards know. Click it on the drawing instead.");
+                m.error("That key never reaches the boards (Fn and media keys don't). Press another one.");
                 return;
             };
-            let mode = m.bind_mode();
-            match m.editor.pick_source(layout::key_source(u), mode) {
-                Ok(Some(text)) => m.info(text),
-                Ok(None) => {}
-                Err(text) => m.error(text),
-            }
+            m.capture_press(layout::key_source(u), true);
         }
         Capture::Target(_) if escape => m.editor.cancel(),
         _ if escape => m.notice = None,
@@ -182,8 +192,30 @@ fn key_up(mut model: State<Model>, e: &KeyboardEventData) {
     if let Some(bit) =
         hid::usage_from_code_name(&e.code.to_string()).and_then(hid::Modifier::from_usage).map(hid::Modifier::bit)
     {
-        model.write().pc_mods &= !bit;
+        let mut m = model.write();
+        m.pc_mods &= !bit;
+        let held = m.pc_mods;
+        m.capture_release(held, true);
     }
+}
+
+/// The modifier bits (left and right) that may still be held, given the toolkit's modifier state.
+fn held_mask(mods: Modifiers) -> u8 {
+    // HID modifier bits: Ctrl 0x01/0x10, Shift 0x02/0x20, Alt 0x04/0x40, GUI 0x08/0x80
+    let mut mask = 0u8;
+    if mods.contains(Modifiers::CONTROL) {
+        mask |= 0x11;
+    }
+    if mods.contains(Modifiers::SHIFT) {
+        mask |= 0x22;
+    }
+    if mods.contains(Modifiers::ALT) {
+        mask |= 0x44;
+    }
+    if mods.contains(Modifiers::META) {
+        mask |= 0x88;
+    }
+    mask
 }
 
 fn top_bar(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl IntoElement {
@@ -227,9 +259,17 @@ fn top_bar(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl IntoEl
             Button::new()
                 .enabled(!dirty.is_empty() && !busy)
                 .on_press(move |_| {
-                    let fx = model.read().apply_effects();
+                    let (fx, waiting) = {
+                        let m = model.read();
+                        (m.apply_effects(), m.waiting_for_board().first().and_then(|&s| m.why_not_writable(s)))
+                    };
                     match fx {
-                        Ok(fx) => fx.into_iter().for_each(|e| apply_host.send(e)),
+                        Ok(fx) => {
+                            fx.into_iter().for_each(|e| apply_host.send(e));
+                            if let Some(why) = waiting {
+                                model.write().info(why);
+                            }
+                        }
                         Err(e) => model.write().error(e),
                     }
                 })
