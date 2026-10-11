@@ -60,6 +60,8 @@ Deleting the file only loses that.
 | `XD2JOY_DEMO` | Run with simulated boards (the board configs file is not read or written) |
 | `XD2JOY_PAGE` | Open on a page by its name |
 
+For a first run on real boards, follow [TESTING.md](TESTING.md).
+
 ## Updating firmware
 
 1. On the **Boards** page, click **Update firmware…** on a board's card and pick its `.uf2` (`xd2joy_LEFT.uf2` for the
