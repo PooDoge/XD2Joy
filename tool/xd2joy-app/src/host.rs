@@ -163,7 +163,7 @@ impl Host {
             Ok(mut conn) => {
                 self.emit(HostEvent::Connected { side, port: port.clone() });
                 for cmd in [Command::Version, Command::Mode(None), Command::Input(None)] {
-                    if let Err(e) = conn.send(cmd) {
+                    if let Err(e) = conn.send(&cmd) {
                         self.emit(HostEvent::SendFailed { side, error: e.to_string() });
                         break;
                     }
@@ -241,7 +241,7 @@ impl Host {
             self.emit(HostEvent::SendFailed { side, error: "That board is not connected.".into() });
             return;
         };
-        if let Err(e) = live.conn.send(command) {
+        if let Err(e) = live.conn.send(&command) {
             self.emit(HostEvent::SendFailed { side, error: e.to_string() });
         }
     }

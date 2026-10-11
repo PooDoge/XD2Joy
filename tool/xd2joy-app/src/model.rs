@@ -250,7 +250,7 @@ impl Model {
                     }
                     Reply::Mode { mode, .. } => board.mode = Some(mode),
                     Reply::Input(status) => board.input = Some(status),
-                    Reply::Bootloader | Reply::Other(_) => {}
+                    _ => {}
                 }
             }
             ConnectionEvent::Unreadable { raw, error } => self.log(Some(side), format!("{raw}  ({error})")),

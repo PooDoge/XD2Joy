@@ -63,7 +63,7 @@ impl Connection {
         &self.board
     }
 
-    pub fn send(&mut self, command: Command) -> Result<(), DeviceError> {
+    pub fn send(&mut self, command: &Command) -> Result<(), DeviceError> {
         let line = command.encode();
         tracing::debug!(port = %self.board.port, line = line.trim_end(), "send");
         self.writer

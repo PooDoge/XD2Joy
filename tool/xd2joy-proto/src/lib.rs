@@ -1,14 +1,27 @@
 //! The XD2Joy console protocol, with no I/O: which USB ids belong to which board, the commands the
 //! tool sends, and the reply lines the firmware prints (`[TAG] text`, one per line).
 //!
-//! Files: `lib.rs` (board identity, commands), `reply.rs` (parsing reply lines), `lines.rs` (splitting
-//! a byte stream into lines).
+//! Files: `lib.rs` (board identity), `command.rs` (what the tool sends), `reply.rs` (reply lines),
+//! `lines.rs` (splitting the byte stream into lines), `blob.rs` (the config bytes), `mapping.rs`
+//! (bindings <-> blobs), `joycon.rs` and `hid.rs` (the two ends of a binding), `preset.rs` (the web
+//! tool's preset files), `raw.rs` (decoding captured reports).
 
+pub mod blob;
+mod command;
+pub mod hid;
+pub mod joycon;
 mod lines;
+pub mod mapping;
+pub mod preset;
+pub mod raw;
 mod reply;
 
-pub use lines::LineSplitter;
-pub use reply::{FirmwareInfo, InputStatus, ParseError, Reply, parse_line};
+pub use command::{Command, Slot};
+pub use lines::{LineSplitter, split_glued};
+pub use reply::{
+    AddrType, BtAddr, CfgReply, DeviceKind, FirmwareInfo, HidState, InputStatus, LinkEvent, MapReply, ParseError,
+    PeerReply, ProfileReply, ProfileSlot, RawReport, Reply, ScanDevice, ScanReply, SyncStatus, parse_line,
+};
 
 /// The protocol version this tool speaks. The firmware reports its own in `[VER] ... proto N`; a
 /// board without a `ver` command (firmware from before the tool existed) has none.
@@ -73,7 +86,7 @@ impl Side {
 }
 
 /// What the board pretends to be to the console.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     Joycon,
     Stick,
@@ -83,7 +96,7 @@ pub enum Mode {
 impl Mode {
     pub const ALL: [Mode; 3] = [Mode::Joycon, Mode::Stick, Mode::Keyboard];
 
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             Mode::Joycon => "joycon",
             Mode::Stick => "stick",
@@ -99,6 +112,19 @@ impl Mode {
             "KEYBOARD" => Some(Mode::Keyboard),
             _ => None,
         }
+    }
+
+    /// The number a mode hotkey entry stores (`mask >> 8`).
+    pub fn firmware_id(self) -> u8 {
+        match self {
+            Mode::Joycon => 0,
+            Mode::Keyboard => 1,
+            Mode::Stick => 2,
+        }
+    }
+
+    pub fn from_firmware_id(id: u8) -> Option<Mode> {
+        Mode::ALL.into_iter().find(|m| m.firmware_id() == id)
     }
 
     pub fn label(self) -> &'static str {
@@ -122,7 +148,7 @@ pub enum InputSource {
 impl InputSource {
     pub const ALL: [InputSource; 3] = [InputSource::Auto, InputSource::Bluetooth, InputSource::Usb];
 
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             InputSource::Auto => "auto",
             InputSource::Bluetooth => "bt",
@@ -148,32 +174,6 @@ impl InputSource {
     }
 }
 
-/// A console command. Each one makes the firmware print at least one reply line, except
-/// `Bootloader`, after which the board leaves USB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
-    Version,
-    Bootloader,
-    /// `None` asks for the current mode.
-    Mode(Option<Mode>),
-    /// `None` asks for the current input source.
-    Input(Option<InputSource>),
-}
-
-impl Command {
-    /// The line to write, newline included.
-    pub fn encode(self) -> String {
-        match self {
-            Command::Version => "ver\n".to_owned(),
-            Command::Bootloader => "bootloader\n".to_owned(),
-            Command::Mode(None) => "mode\n".to_owned(),
-            Command::Mode(Some(m)) => format!("mode {}\n", m.word()),
-            Command::Input(None) => "input\n".to_owned(),
-            Command::Input(Some(s)) => format!("input {}\n", s.word()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,16 +184,6 @@ mod tests {
         assert_eq!(Side::from_usb(0x2FE3, 0x0004), Some(Side::Right));
         assert_eq!(Side::from_usb(0x2FE3, 0x0001), None);
         assert_eq!(Side::from_usb(0x239A, 0x0005), None);
-    }
-
-    #[test]
-    fn commands_encode_as_the_firmware_expects() {
-        assert_eq!(Command::Version.encode(), "ver\n");
-        assert_eq!(Command::Bootloader.encode(), "bootloader\n");
-        assert_eq!(Command::Mode(Some(Mode::Keyboard)).encode(), "mode keyboard\n");
-        assert_eq!(Command::Mode(None).encode(), "mode\n");
-        assert_eq!(Command::Input(Some(InputSource::Bluetooth)).encode(), "input bt\n");
-        assert_eq!(Command::Input(None).encode(), "input\n");
     }
 
     #[test]
