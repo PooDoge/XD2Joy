@@ -450,11 +450,17 @@ impl Mapping {
         Ok(true)
     }
 
-    /// Binds `source` to `target` and removes the other targets that source had, which is what
-    /// "rebind" means in the mapper. Returns the bindings it removed, for undo.
+    /// Binds `source` to `target`, replacing what was there: the source's other targets, and the
+    /// target's other sources on the same board (a key replaces a key, a mouse button a mouse
+    /// button, as in the web tool). Returns the bindings it removed.
     pub fn rebind(&mut self, b: Binding) -> Result<Vec<Binding>, MapError> {
-        let removed: Vec<Binding> =
-            self.bindings.iter().copied().filter(|x| x.source == b.source && x.target != b.target).collect();
+        let removed: Vec<Binding> = self
+            .bindings
+            .iter()
+            .copied()
+            .filter(|x| *x != b)
+            .filter(|x| x.source == b.source || (x.target == b.target && x.source.board() == b.source.board()))
+            .collect();
         let before = self.bindings.clone();
         self.bindings.retain(|x| !removed.contains(x));
         match self.add(b) {
@@ -574,9 +580,20 @@ mod tests {
     fn rebind_moves_and_reports_what_it_removed() {
         let mut m = defaults();
         let space = Source::Key(0x2C);
-        let removed = m.rebind(Binding { source: space, target: Target::Button(Button::Y) });
-        assert_eq!(removed, Ok(vec![Binding { source: space, target: Target::Button(Button::B) }]));
-        assert_eq!(m.targets_of(space).collect::<Vec<_>>(), vec![Target::Button(Button::Y)]);
+        let y = Target::Button(Button::Y);
+        let old: Vec<Source> = m.sources_of(y).collect();
+        assert_eq!(old, vec![Source::Key(0x17)]);
+        let removed = m.rebind(Binding { source: space, target: y }).expect("fits");
+        assert!(removed.contains(&Binding { source: space, target: Target::Button(Button::B) }));
+        // T pressed Y; a key replaces a key
+        assert!(removed.contains(&Binding { source: Source::Key(0x17), target: y }));
+        assert_eq!(removed.len(), 2);
+        assert_eq!(m.targets_of(space).collect::<Vec<_>>(), vec![y]);
+        assert_eq!(m.sources_of(y).collect::<Vec<_>>(), vec![space]);
+        // a mouse button on the same target keeps the key
+        let side = m.rebind(Binding { source: Source::Wheel(WheelDir::Up), target: y }).expect("fits");
+        assert!(side.is_empty());
+        assert_eq!(m.sources_of(y).count(), 2);
     }
 
     #[test]

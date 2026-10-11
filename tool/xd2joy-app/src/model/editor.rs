@@ -68,6 +68,13 @@ impl Editor {
         self.loaded[side.index()] = true;
         if clean {
             self.edit.read_board(blob);
+            if changed {
+                // the board moved on (a profile switch, a restore); undoing into the old state would
+                // write it back over the new one
+                self.undo.clear();
+                self.redo.clear();
+            }
+            self.drag = None;
             false
         } else {
             changed
@@ -160,8 +167,12 @@ impl Editor {
     pub fn pick_target(&mut self, target: Target, mode: BindMode) -> Result<Option<String>, String> {
         match self.capture {
             Capture::Target(source) => {
-                self.capture = Capture::Idle;
-                self.bind(source, target, mode).map(Some)
+                // a refused bind keeps the source waiting, so another target can be tried
+                let r = self.bind(source, target, mode);
+                if r.is_ok() {
+                    self.capture = Capture::Idle;
+                }
+                r.map(Some)
             }
             Capture::Source(t) if t == target => {
                 self.capture = Capture::Idle;
@@ -178,8 +189,11 @@ impl Editor {
     pub fn pick_source(&mut self, source: Source, mode: BindMode) -> Result<Option<String>, String> {
         match self.capture {
             Capture::Source(target) => {
-                self.capture = Capture::Idle;
-                self.bind(source, target, mode).map(Some)
+                let r = self.bind(source, target, mode);
+                if r.is_ok() {
+                    self.capture = Capture::Idle;
+                }
+                r.map(Some)
             }
             Capture::Target(s) if s == source => {
                 self.capture = Capture::Idle;
@@ -207,6 +221,13 @@ impl Editor {
     /// Bind, and say what happened in one sentence.
     pub fn bind(&mut self, source: Source, target: Target, mode: BindMode) -> Result<String, String> {
         let b = Binding::new(source, target).map_err(|e| sentence(&e.to_string()))?;
+        let board = source.board();
+        if !self.loaded[board.index()] {
+            return Err(format!(
+                "The {} board hasn't been read yet, so its bindings can't be changed. Connect it first.",
+                if board == Side::Left { "left" } else { "right" }
+            ));
+        }
         let removed = self
             .change(|m| match mode {
                 BindMode::Move => m.rebind(b),
@@ -220,9 +241,13 @@ impl Editor {
                 other => sentence(&other.to_string()),
             })?;
         let mut text = format!("{} now presses {}.", source.label(), target_name(target));
-        if !removed.is_empty() {
-            let old: Vec<String> = removed.iter().map(|r| target_name(r.target)).collect();
+        let old: Vec<String> = removed.iter().filter(|r| r.source == source).map(|r| target_name(r.target)).collect();
+        if !old.is_empty() {
             text.push_str(&format!(" It no longer presses {}.", old.join(" or ")));
+        }
+        let replaced: Vec<String> = removed.iter().filter(|r| r.source != source).map(|r| r.source.label()).collect();
+        if !replaced.is_empty() {
+            text.push_str(&format!(" {} no longer does.", replaced.join(" and ")));
         }
         Ok(text)
     }
@@ -385,14 +410,40 @@ mod tests {
         assert_eq!(e.capture, Capture::Source(t));
         assert!(e.pick_source(s, BindMode::Move).is_ok_and(|m| m.is_some()));
         assert_eq!(e.capture, Capture::Idle);
-        assert!(e.edit.targets_of(s).any(|x| x == t));
+        // a key replaces the key that was there (F5)
+        assert_eq!(e.edit.sources_of(t).collect::<Vec<_>>(), vec![s]);
 
         let s2 = Source::Key(0x47);
         assert_eq!(e.pick_source(s2, BindMode::Add), Ok(None));
         assert!(e.pick_target(t, BindMode::Add).is_ok_and(|m| m.is_some()));
-        assert_eq!(e.edit.sources_of(t).count(), 3);
+        assert_eq!(e.edit.sources_of(t).count(), 2);
         // a device press only counts while a target waits
         assert_eq!(e.pressed(Source::Key(0x48), BindMode::Move), None);
+    }
+
+    #[test]
+    fn an_unread_board_cannot_be_edited_and_a_refused_bind_keeps_waiting() {
+        let mut e = Editor::default();
+        e.board_config(&ConfigBlob::firmware_default(Side::Left));
+        let t = Target::Button(Button::A);
+        let _ = e.pick_target(t, BindMode::Move);
+        // the mouse is on the right board, which was never read
+        let r = e.pick_source(Source::Wheel(xd2joy_proto::hid::WheelDir::Up), BindMode::Move);
+        assert!(r.is_err_and(|m| m.contains("right board")));
+        assert_eq!(e.capture, Capture::Source(t));
+        assert!(e.pick_source(Source::Key(0x04), BindMode::Move).is_ok());
+    }
+
+    #[test]
+    fn a_board_that_moved_on_clears_undo() {
+        let mut e = loaded();
+        e.tweak("gain", |m| m.tuning.mouse_gain = 300);
+        e.discard();
+        assert!(e.can_undo());
+        let mut other = ConfigBlob::firmware_default(Side::Right);
+        other.stick_gain = other.stick_gain.wrapping_add(1);
+        e.board_config(&other);
+        assert!(!e.can_undo() && !e.can_redo());
     }
 
     #[test]

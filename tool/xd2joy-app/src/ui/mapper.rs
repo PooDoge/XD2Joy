@@ -56,8 +56,8 @@ pub fn page(model: State<Model>, m: &Model) -> impl IntoElement {
                 .spacing(GAP)
                 .main_align(Alignment::Center)
                 .child(target_list(model, m, Side::Left, &looks))
-                .child(joycon(model, m, Side::Left, &looks))
-                .child(joycon(model, m, Side::Right, &looks))
+                .child(joycon(model, m, Side::Left, &looks, true))
+                .child(joycon(model, m, Side::Right, &looks, true))
                 .child(target_list(model, m, Side::Right, &looks)),
         )
         .child(
@@ -94,25 +94,37 @@ fn header(mut model: State<Model>, m: &Model) -> impl IntoElement {
         .child(label().text(hint).color(if m.editor.capture == Capture::Idle { INK } else { ACCENT }))
         .child(
             row()
-                .child(muted("When an input is bound again it"))
+                .child(muted("Binding a key or mouse button"))
                 .child(SegmentedButton::new().children([
                     ButtonSegment::new()
                         .key("move")
                         .selected(!add)
                         .on_press(move |_| model.write().add_mode = false)
-                        .child("moves")
+                        .child("replaces what was there")
                         .into_element(),
                     ButtonSegment::new()
                         .key("add")
                         .selected(add)
                         .on_press(move |_| model.write().add_mode = true)
-                        .child("presses both")
+                        .child("adds to it")
                         .into_element(),
                 ]))
                 .child(rect().width(Size::px(16.)))
                 .child(count(Side::Left))
                 .child(count(Side::Right)),
         )
+        .children(Side::BOTH.into_iter().filter(|s| !m.editor.loaded[s.index()]).map(|s| {
+            label()
+                .key(s.letter().to_string())
+                .text(format!(
+                    "The {} board isn't connected, so its {} bindings are shown as the built-in defaults and can't be \
+                     changed.",
+                    crate::model::side_word(s),
+                    if s == Side::Left { "keyboard" } else { "mouse" }
+                ))
+                .color(WARN)
+                .into_element()
+        }))
         .maybe_child((!m.editor.edit.has_home()).then(|| {
             label()
                 .text("Nothing presses HOME. The right board wakes a sleeping Switch when HOME is held, so bind it to something.")
@@ -226,7 +238,15 @@ fn at(s: Spot) -> Rect {
         .center()
 }
 
-pub(super) fn joycon(mut model: State<Model>, m: &Model, half: Side, looks: &Looks) -> impl IntoElement {
+/// A Joy-Con half. `interactive` is off for previews (the Colours page), where a click must not
+/// start a binding.
+pub(super) fn joycon(
+    mut model: State<Model>,
+    m: &Model,
+    half: Side,
+    looks: &Looks,
+    interactive: bool,
+) -> impl IntoElement {
     let (w, h) = layout::JOYCON_SIZE;
     let colours = m.editor.edit.colours[half.index()];
     let rgb = |c: xd2joy_proto::Rgb| Color::from_rgb(c.0[0], c.0[1], c.0[2]);
@@ -240,61 +260,68 @@ pub(super) fn joycon(mut model: State<Model>, m: &Model, half: Side, looks: &Loo
         Side::Left => layout::left_spots(),
         Side::Right => layout::right_spots(),
     };
-    rect()
-        .width(Size::px(w))
-        .height(Size::px(h))
-        .child(
-            rect()
-                .position(Position::new_absolute().left(body.x).top(body.y))
-                .width(Size::px(body.w))
-                .height(Size::px(body.h))
-                .corner_radius(radius)
-                .background(rgb(colours.body))
-                .border(Border::new().fill(BORDER).width(1.)),
-        )
-        .child(
-            rect()
-                .position(Position::new_absolute().left(rail_x).top(body.y + 8.))
-                .width(Size::px(10.))
-                .height(Size::px(body.h - 16.))
-                .corner_radius(4.)
-                .background(rgb(colours.rail)),
-        )
-        .children(spots.into_iter().map(|(t, text, s)| {
-            let sources: Vec<_> = m.editor.edit.sources_of(t).collect();
-            let bound = !sources.is_empty();
-            let live = sources.iter().any(|s| looks.held(*s));
-            let selected = looks.capture == Capture::Source(t);
-            let related = looks.hover == Some(Hover::Target(t))
-                || matches!(looks.hover, Some(Hover::Source(src)) if sources.contains(&src));
-            let fill = if live {
-                GLOW
-            } else if selected {
-                ACCENT
-            } else if bound {
-                rgb(colours.buttons)
-            } else {
-                JC_BUTTON
-            };
-            let stick = matches!(
-                t,
-                Target::Button(xd2joy_proto::Button::LeftStickPress | xd2joy_proto::Button::RightStickPress)
-            );
-            at(s)
-                .key(format!("{t:?}"))
-                .background(if stick && !live && !selected { rgb(colours.stick) } else { fill })
-                .border(Border::new().fill(if related { ACCENT } else { BORDER }).width(if related { 2. } else { 1. }))
-                .on_press(move |_| pick_target(model, t))
-                .on_secondary_down(move |_| model.write().editor.clear_target(t))
-                .on_pointer_enter(move |_| model.write().hover = Some(Hover::Target(t)))
-                .on_pointer_leave(move |_| leave(model, Hover::Target(t)))
-                .child(label().text(text).font_size(TEXT_SMALL).color(if bound || live || selected {
+    // Everything is a child of the body so it is painted over it (absolutely placed siblings of
+    // the body were sometimes painted under it). Positions are relative to the body.
+    let shift = |s: Spot| Spot { x: s.x - body.x, y: s.y - body.y, ..s };
+    rect().width(Size::px(w)).height(Size::px(h)).padding(Gaps::new(body.y, 0., 0., body.x)).child(
+        rect()
+            .width(Size::px(body.w))
+            .height(Size::px(body.h))
+            .corner_radius(radius)
+            .background(rgb(colours.body))
+            .border(Border::new().fill(BORDER).width(1.))
+            .child(
+                rect()
+                    .position(Position::new_absolute().left(rail_x - body.x).top(8.))
+                    .width(Size::px(10.))
+                    .height(Size::px(body.h - 16.))
+                    .corner_radius(4.)
+                    .background(rgb(colours.rail)),
+            )
+            .children(spots.into_iter().map(|(t, text, s)| {
+                let sources: Vec<_> = m.editor.edit.sources_of(t).collect();
+                let bound = !sources.is_empty();
+                let live = sources.iter().any(|s| looks.held(*s));
+                let selected = looks.capture == Capture::Source(t);
+                let related = looks.hover == Some(Hover::Target(t))
+                    || matches!(looks.hover, Some(Hover::Source(src)) if sources.contains(&src));
+                let fill = if live {
+                    GLOW
+                } else if selected {
+                    ACCENT
+                } else if bound {
+                    rgb(colours.buttons)
+                } else {
+                    JC_BUTTON
+                };
+                let stick = matches!(
+                    t,
+                    Target::Button(xd2joy_proto::Button::LeftStickPress | xd2joy_proto::Button::RightStickPress)
+                );
+                let cap = at(shift(s))
+                    .key(format!("{t:?}"))
+                    .background(if stick && !live && !selected { rgb(colours.stick) } else { fill })
+                    .border(Border::new().fill(if related { ACCENT } else { BORDER }).width(if related {
+                        2.
+                    } else {
+                        1.
+                    }));
+                let cap = if interactive {
+                    cap.on_press(move |_| pick_target(model, t))
+                        .on_secondary_down(move |_| model.write().editor.clear_target(t))
+                        .on_pointer_enter(move |_| model.write().hover = Some(Hover::Target(t)))
+                        .on_pointer_leave(move |_| leave(model, Hover::Target(t)))
+                } else {
+                    cap
+                };
+                cap.child(label().text(text).font_size(TEXT_SMALL).color(if bound || live || selected {
                     Color::BLACK
                 } else {
                     INK
                 }))
                 .into_element()
-        }))
+            })),
+    )
 }
 
 fn keycap(model: State<Model>, m: &Model, looks: &Looks, cap: Cap) -> Element {
@@ -386,23 +413,30 @@ fn keyboard(model: State<Model>, m: &Model, looks: &Looks) -> impl IntoElement {
 
 fn mouse(model: State<Model>, m: &Model, looks: &Looks) -> impl IntoElement {
     let (w, h) = layout::MOUSE_SIZE;
+    let motion = m.live.last_motion().map_or_else(
+        || "Move the mouse to see what the board receives.".to_owned(),
+        |s| format!("Last report: x {:+} · y {:+} · wheel {:+}", s.dx, s.dy, s.wheel),
+    );
     // the buttons are children of the body so they are drawn over it; positions are relative to
     // the drawing, which starts 10 px left of the body
-    panel("Mouse (right board)").width(Size::auto()).child(
-        rect().width(Size::px(w)).height(Size::px(h)).padding(Gaps::new(0., 10., 0., 10.)).child(
-            rect()
-                .width(Size::fill())
-                .height(Size::fill())
-                .corner_radius(CornerRadius::new(60., 60., 70., 70.))
-                .background(JC_BODY)
-                .border(Border::new().fill(BORDER).width(1.))
-                .children(layout::mouse_spots().into_iter().map(|(source, text, s)| {
-                    source_cap(model, m, looks, source, text, Size::px(s.w), Size::px(s.h), s.r)
-                        .position(Position::new_absolute().left(s.x - 10.).top(s.y))
-                        .into_element()
-                })),
-        ),
-    )
+    panel("Mouse (right board)")
+        .width(Size::auto())
+        .child(
+            rect().width(Size::px(w)).height(Size::px(h)).padding(Gaps::new(0., 10., 0., 10.)).child(
+                rect()
+                    .width(Size::fill())
+                    .height(Size::fill())
+                    .corner_radius(CornerRadius::new(60., 60., 70., 70.))
+                    .background(JC_BODY)
+                    .border(Border::new().fill(BORDER).width(1.))
+                    .children(layout::mouse_spots().into_iter().map(|(source, text, s)| {
+                        source_cap(model, m, looks, source, text, Size::px(s.w), Size::px(s.h), s.r)
+                            .position(Position::new_absolute().left(s.x - 10.).top(s.y))
+                            .into_element()
+                    })),
+            ),
+        )
+        .child(muted(motion))
 }
 
 fn stick_sources(mut model: State<Model>, m: &Model) -> impl IntoElement {

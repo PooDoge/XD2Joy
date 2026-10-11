@@ -129,6 +129,7 @@ pub fn start(bus: impl Bus, sink: Sink) -> std::io::Result<HostHandle> {
         failed: Vec::new(),
         warned_duplicate: [false, false],
         deferred: VecDeque::new(),
+        skipped: None,
         timers: Vec::new(),
     };
     std::thread::Builder::new().name("xd2joy-host".into()).spawn(move || host.run())?;
@@ -157,6 +158,8 @@ struct Host<B: Bus> {
     warned_duplicate: [bool; 2],
     /// Requests from the window that arrived during a job.
     deferred: VecDeque<Effect>,
+    /// A board `on_all` skipped because it was not connected, for the job's message.
+    skipped: Option<Side>,
     timers: Vec<(Instant, Timer)>,
 }
 
@@ -277,11 +280,16 @@ impl<B: Bus> Host<B> {
             Ok(_) => self.emit(HostEvent::NoVersion { side }),
             Err(e) => {
                 tracing::warn!(?side, error = %e, "ver");
+                self.emit(HostEvent::Failed(format!("Couldn't talk to the {} board: {e}", side_word(side))));
                 return;
             }
         }
         if let Err(e) = self.reload(side) {
             tracing::warn!(?side, error = %e, "first read");
+            self.emit(HostEvent::Failed(format!(
+                "Couldn't read the {} board's settings: {e} Try Read again on the Boards page.",
+                side_word(side)
+            )));
         }
     }
 
@@ -417,12 +425,18 @@ impl<B: Bus> Host<B> {
     /// Run a job with the busy indicator, reporting its outcome.
     fn job(&mut self, title: &str, f: impl FnOnce(&mut Self) -> Job<Option<String>>) {
         self.emit(HostEvent::Working(Some(title.to_owned())));
+        self.skipped = None;
         let result = f(self);
         self.emit(HostEvent::Working(None));
-        match result {
-            Ok(Some(done)) => self.emit(HostEvent::Done(done)),
-            Ok(None) => {}
-            Err(e) => {
+        let skipped = self.skipped.take().map(|s| {
+            format!("The {} board isn't connected, so it wasn't changed; do this again once it is.", side_word(s))
+        });
+        match (result, skipped) {
+            (Ok(Some(done)), Some(note)) => self.emit(HostEvent::Done(format!("{done} {note}"))),
+            (Ok(None), Some(note)) => self.emit(HostEvent::Done(note)),
+            (Ok(Some(done)), None) => self.emit(HostEvent::Done(done)),
+            (Ok(None), None) => {}
+            (Err(e), _) => {
                 tracing::warn!(job = title, error = %e, "job failed");
                 self.emit(HostEvent::Failed(e));
             }
@@ -492,8 +506,9 @@ impl<B: Bus> Host<B> {
             }),
             Effect::SyncNow => self.job("Unpairing from the console", |h| {
                 h.on_all(|h, side| h.run_cmd(side, Command::SyncNow).map(drop))?;
+                // `sync` prints nothing, so this can't be confirmed
                 Ok(Some(
-                    "The boards forgot the console and are pairable for 2 minutes. On the Switch, open Controllers > \
+                    "Sent. The boards should now be pairable for 2 minutes: on the Switch, open Controllers > \
                      Change Grip/Order."
                         .into(),
                 ))
@@ -512,7 +527,11 @@ impl<B: Bus> Host<B> {
                 if pinned { Ok(None) } else { Err(format!("The {} board did not take the device.", side_word(side))) }
             }),
             Effect::Unpin(side) => self.job("Forgetting the device", |h| {
-                h.run_cmd(side, Command::PeerClear)?;
+                // `peer none` prints nothing; its follow-up `peer` shows the pin
+                let r = h.run_cmd(side, Command::PeerClear)?;
+                if r.iter().any(|r| matches!(r, Reply::Peer(PeerReply::Pin(Some(_))))) {
+                    return Err(format!("The {} board still has the device.", side_word(side)));
+                }
                 Ok(None)
             }),
             Effect::Flash { side, file } => {
@@ -535,8 +554,13 @@ impl<B: Bus> Host<B> {
         if sides.is_empty() {
             return Err("Connect a board first.".into());
         }
-        for side in sides {
-            f(self, side)?;
+        self.skipped = Side::BOTH.into_iter().find(|s| !sides.contains(s));
+        for &side in &sides {
+            f(self, side).map_err(|e| match (side, sides.first()) {
+                // the first board already took it; say so, since nothing undoes that
+                (Side::Right, Some(Side::Left)) => format!("{e} The left board was already changed."),
+                _ => e,
+            })?;
         }
         Ok(())
     }
@@ -558,14 +582,13 @@ impl<B: Bus> Host<B> {
             ));
         }
         let cmd = Command::cfg_write(blob).map_err(|e| e.to_string())?;
-        let replies = self.run_cmd(side, cmd)?;
-        match replies.iter().find_map(|r| match r {
-            Reply::Cfg(c) => Some(c),
+        // An unanswered write may still have landed; the read-back below decides.
+        let replies = self.run_cmd(side, cmd).unwrap_or_default();
+        if let Some(why) = replies.iter().find_map(|r| match r {
+            Reply::Cfg(CfgReply::WriteError(why)) => Some(why),
             _ => None,
         }) {
-            Some(CfgReply::WriteOk) => {}
-            Some(CfgReply::WriteError(why)) => return Err(format!("The {} board refused it: {why}.", side_word(side))),
-            _ => return Err(format!("The {} board did not confirm the write.", side_word(side))),
+            return Err(format!("The {} board refused it: {why}.", side_word(side)));
         }
         let back = self.read_cfg(side)?;
         if back != *blob {
@@ -622,6 +645,19 @@ impl<B: Bus> Host<B> {
         let bytes = std::fs::read(file).map_err(|e| format!("could not read {}: {e}", file.display()))?;
         let image = Uf2Image::parse(bytes).map_err(|e| format!("{} is not a usable UF2 file: {e}", file.display()))?;
         image.require_family(FAMILY_NRF52840).map_err(|e| e.to_string())?;
+        // The image carries no side marker; release files are named xd2joy_LEFT.uf2 / _RIGHT.uf2.
+        let name = file.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
+        let wrong = match side {
+            Side::Left => name.contains("RIGHT"),
+            Side::Right => name.contains("LEFT"),
+        };
+        if wrong {
+            return Err(format!(
+                "{} looks like firmware for the other board. Pick the {} file.",
+                file.display(),
+                side_word(side)
+            ));
+        }
 
         let before = self.bus.boot_drives();
         let other = match side {
@@ -885,6 +921,40 @@ mod tests {
         assert!(rig.received(Side::Right).iter().any(|l| l == "bootloader"));
         assert_eq!(rig.bus.world().boards[1].version, "v1.2-demo");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn firmware_named_for_the_other_board_is_refused() {
+        let rig = Rig::new(FakeBus::new());
+        rig.both_read();
+        let dir = std::env::temp_dir().join(format!("xd2joy-side-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("xd2joy_LEFT.uf2");
+        std::fs::write(&file, uf2(4)).expect("write image");
+        rig.host.send(Effect::Flash { side: Side::Right, file });
+        let e = rig.wait("flash end", |e| matches!(e, HostEvent::Flash(s) if s.is_finished()));
+        assert!(matches!(e, HostEvent::Flash(FlashStage::Failed { .. })));
+        assert!(!rig.received(Side::Right).iter().any(|l| l == "bootloader"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_job_on_both_boards_names_the_missing_one() {
+        let bus = FakeBus::new();
+        bus.world().boards[1].present = false;
+        let rig = Rig::new(bus);
+        rig.wait("left read", |e| {
+            matches!(
+                e,
+                HostEvent::Board {
+                    side: Side::Left,
+                    event: ConnectionEvent::Line { reply: Reply::Peer(PeerReply::Attached(_)), .. }
+                }
+            )
+        });
+        rig.host.send(Effect::Grip(false));
+        let e = rig.wait("grip result", done);
+        assert!(matches!(&e, HostEvent::Done(t) if t.contains("right board isn't connected")), "{e:?}");
     }
 
     /// A small valid nRF52840 UF2 image.

@@ -135,9 +135,10 @@ fn device_card(model: State<Model>, m: &Model, side: Side, host: &HostHandle) ->
                 )),
         )
         .maybe_child(b.scanning.then(|| muted("Put the device in pairing mode now. Searching for 20 seconds.")))
-        .children(
-            heard.into_iter().enumerate().map(|(i, d)| heard_row(m, side, d, want, ok, host).key(i).into_element()),
-        )
+        .children(heard.into_iter().map(|d| {
+            let k = d.addr.hex();
+            heard_row(m, side, d, want, ok, host).key(k).into_element()
+        }))
 }
 
 fn label_of(t: String) -> Label {
@@ -225,7 +226,7 @@ fn profile_row(
     let recording = m.hotkey_capture == Some(HotkeyFor::Profile(slot));
     let name_field =
         Writable::from_state(model).map(move |m| &m.drafts.profile_names[i], move |m| &mut m.drafts.profile_names[i]);
-    let (switch_host, save_host, rename_host, key_host) = (host.clone(), host.clone(), host.clone(), host.clone());
+    let (switch_host, rename_host, key_host) = (host.clone(), host.clone(), host.clone());
     let save_name = if draft.is_empty() { name.clone() } else { draft.clone() };
     let mut panel = panel(&format!("{n}. {name}{}", if active { "  (active)" } else { "" }));
     panel = panel
@@ -238,16 +239,19 @@ fn profile_row(
             row()
                 .child(
                     Button::new()
-                        .enabled(ok && saved && !active)
+                        .enabled(ok && saved && !active && !dirty)
                         .on_press(move |_| switch_host.send(Effect::ProfileSwitch(slot)))
                         .child("Switch to it"),
                 )
-                .child(
-                    Button::new()
-                        .enabled(ok && !dirty)
-                        .on_press(move |_| save_host.send(Effect::ProfileSave { slot, name: save_name.clone() }))
-                        .child(if saved { "Overwrite with current" } else { "Save current here" }),
-                )
+                .child(danger_button(
+                    model,
+                    m,
+                    format!("save profile {n}"),
+                    if saved { "Overwrite with current" } else { "Save current here" },
+                    ok && !dirty,
+                    Effect::ProfileSave { slot, name: save_name },
+                    host,
+                ))
                 .child(Input::new(name_field).placeholder("New name").width(Size::px(180.)))
                 .child(
                     Button::new()
@@ -442,6 +446,9 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
     rect()
         .width(Size::fill())
         .spacing(GAP)
+        .child(panel("Stick and mouse").child(muted(
+            "These are part of the right board's mapping: they reach the board with Apply, and Undo takes them back.",
+        )))
         .child(
             panel("Mouse (Joy-Con mouse mode)")
                 .child(slider_row(
@@ -458,7 +465,12 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
                         .child(
                             Switch::new()
                                 .toggled(t.accel)
-                                .on_toggle(move |_| model.write().editor.tweak("accel", |map| map.tuning.accel = !map.tuning.accel)),
+                                .on_toggle(move |_| {
+                                    let _ = model.write().editor.change(|map| {
+                                        map.tuning.accel = !map.tuning.accel;
+                                        Ok::<(), ()>(())
+                                    });
+                                }),
                         )
                         .child(label().text("Acceleration: fast movements go further")),
                 ),
@@ -477,7 +489,7 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
                 .child(slider_row(
                     model,
                     "Anti-deadzone",
-                    "Skips the stick's dead centre so small movements register in games. The web tool shows a tenth of this.",
+                    "Skips the stick's dead centre so small movements register in games. The number in brackets is the web tool's scale.",
                     t.stick_deadzone,
                     format!("{} ({:.1})", t.stick_deadzone, f64::from(t.stick_deadzone) / 10.),
                     STICK_DEADZONE,
@@ -486,7 +498,7 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
                 .child(slider_row(
                     model,
                     "Return speed",
-                    "How fast the stick follows the mouse and settles back. The web tool stops at 20.",
+                    "How fast the stick follows the mouse and settles back.",
                     t.stick_speed,
                     t.stick_speed.to_string(),
                     STICK_SPEED,
@@ -500,7 +512,7 @@ pub fn tuning(mut model: State<Model>, m: &Model, host: &HostHandle) -> impl Int
                                 Ok::<(), ()>(())
                             });
                         })
-                        .child("Back to defaults"),
+                        .child("Reset all stick and mouse settings"),
                 )
                 .maybe_child(right.live_tuning.map(|l| {
                     muted(format!(
@@ -602,7 +614,7 @@ fn colour_card(mut model: State<Model>, m: &Model, half: Side, looks: &Looks) ->
     card()
         .child(side_title(half))
         .child(
-            row().child(mapper::joycon(model, m, half, looks)).child(
+            row().child(mapper::joycon(model, m, half, looks, false)).child(
                 rect()
                     .spacing(8.)
                     .child(part("Body", c.body, |c, v| c.body = v))
@@ -826,7 +838,7 @@ pub fn advanced(model: State<Model>, m: &Model, host: &HostHandle) -> impl IntoE
             panel("Console")
                 .child(
                     row().child(Button::new().on_press(move |_| save_diagnostics(model)).child("Save diagnostics…")).child(muted(
-                        "Saves this log and what the app knows about both boards, for a bug report.",
+                        "Saves this log and what the app knows about both boards, for a bug report. It includes the Bluetooth addresses of your devices.",
                     )),
                 )
                 .child(
@@ -849,9 +861,9 @@ fn raw_panel(m: &Model) -> impl IntoElement {
              changed are highlighted. Useful when a key or button does nothing.",
         ))
         .maybe_child(m.raw.is_empty().then(|| muted("Nothing yet. Press something on the keyboard or mouse.")))
-        .children(m.raw.iter().enumerate().map(|(i, r)| {
+        .children(m.raw.iter().map(|r| {
             row()
-                .key(i)
+                .key(format!("{}{}{}", r.side.letter(), r.handle, r.len))
                 .child(
                     label()
                         .text(format!("{} h=0x{:04X} len={}", r.side.letter(), r.handle, r.len))
@@ -950,7 +962,12 @@ fn diagnostics(m: &Model) -> String {
     }
     out.push_str("== Console ==\n");
     for line in &m.log {
-        out.push_str(line);
+        // a pairing code is only good once, but there is no reason to hand it out
+        if line.to_ascii_lowercase().contains("passkey") {
+            out.extend(line.chars().map(|c| if c.is_ascii_digit() { '*' } else { c }));
+        } else {
+            out.push_str(line);
+        }
         out.push('\n');
     }
     out
