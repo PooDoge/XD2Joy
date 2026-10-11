@@ -176,7 +176,7 @@ XD2JOY_BOARD=xiao ZEPHYR_WORKSPACE="$PWD/zephyrproject" bash firmware/build.sh
 ```
 
 The XIAO build runs Bluetooth timing from the board's 32.768 kHz crystal, which Pro Micro clones
-don't have. If a XIAO build misbehaves (no USB serial port, or Bluetooth never connects), try
+don't have. If a XIAO build misbehaves (no USB serial port, or Bluetooth never connects), double-press reset to get the drive back and try
 `XD2JOY_CLOCK=rc` in front of the command above to use the RC oscillator like a Pro Micro, and
 report it.
 

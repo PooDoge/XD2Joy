@@ -12,8 +12,15 @@ esac
 XIAO=0
 case "$BOARD" in xiao_ble*) XIAO=1 ;; esac
 # the XIAO runs its 32 kHz clock from its crystal; XD2JOY_CLOCK=rc uses the RC oscillator like a Pro Micro
+case "${XD2JOY_CLOCK:-}" in
+  ""|xtal|rc) ;;
+  *) echo "STOP: XD2JOY_CLOCK must be xtal or rc"; exit 1 ;;
+esac
+if [ $XIAO -eq 0 ] && [ "${XD2JOY_CLOCK:-}" = xtal ]; then
+  echo "STOP: XD2JOY_CLOCK=xtal is for the XIAO only; $BOARD has no 32 kHz crystal"; exit 1
+fi
 CLOCK_RC=1
-if [ $XIAO -eq 1 ] && [ "${XD2JOY_CLOCK:-xtal}" != rc ]; then CLOCK_RC=0; fi
+if [ $XIAO -eq 1 ] && [ "${XD2JOY_CLOCK:-xtal}" = xtal ]; then CLOCK_RC=0; fi
 echo "board: $BOARD"
 DIR=build_xd2joy
 
@@ -69,7 +76,7 @@ for SIDE in RIGHT LEFT; do
     check "$OUT/zephyr.dts" 'psels = < 0x100002c >;' "wire RX on D7 (P1.12)"
     absent "$OUT/zephyr.dts" 'psels = < 0x9 >;|0x100000a|psels = < 0x24 >;|0x1000026' "no Pro Micro wire pins left"
     check "$OUT/zephyr.dts" 'code_partition: partition@27000' "starts at 0x27000, after the XIAO's SoftDevice 7.3.0"
-    absent "$OUT/.config" '^CONFIG_NORDIC_QSPI_NOR=y$' "external QSPI flash driver left out"
+    absent "$OUT/zephyr.map" 'qspi_nor_init' "external QSPI flash driver left out"
   elif [ "$SIDE" = LEFT ]; then
     check "$OUT/zephyr.dts" 'psels = < 0x9 >;' "wire TX on P0.09 (dev board)"
     check "$OUT/zephyr.dts" 'psels = < 0x100000a >;' "wire RX on P0.10 (Dev board)"

@@ -45,12 +45,15 @@ existing link wire between the two nRF boards (P0.09/P0.10 on the left, P1.04/P1
 the right; D6/D7 crosswise on a pair of XIAOs) stays as it is.
 
 Put a 1 kΩ resistor in series with each TX wire (PB6 and PC6), close to the
-Nucleo. When the Nucleo is powered and an nRF board isn't, the TX line would
-otherwise power that board through its input pin's protection diode, and it
-can then fail to start cleanly when its USB is plugged in. 1 kΩ limits that
-current and doesn't affect 1 Mbaud. The same applies to the D6/D7 link between
-two boards on separate power: a 1 kΩ resistor in each link wire is cheap
-insurance.
+Nucleo. When the Nucleo is on and an nRF board is off, its TX line pushes
+current into that board through the input pin's protection diode. That won't
+damage it, but the board can sit half powered and then start badly when its
+USB is plugged in. 1 kΩ keeps that current to a few mA and doesn't affect
+1 Mbaud. Don't go much above 2.2 kΩ: the receiving pin's internal pull-up
+(about 13 kΩ) would then lift the low level out of spec. The resistor only
+limits the current, so also power the nRF boards before or together with the
+Nucleo. The same 1 kΩ in each wire of the link between the two boards helps
+when they're on separate power.
 
 **Power:** the 5 V pin is fed by the Nucleo's ST-LINK USB port, which is
 current limited to roughly 500 mA. A plain keyboard plus a mouse receiver fits.
@@ -70,14 +73,15 @@ nRF boards:
   that carries only VBUS and GND. Don't feed 5 V into B+ (battery input,
   4.2 V max) or 3V3 (regulator output). Swap the lead for a data cable when
   you need the web tool, flashing or keyboard mode.
-- A Seeed XIAO can instead take the supply on its 5V pad. Seeed's forum says a
-  diode sits between that pad and the USB socket, so a data cable can stay
-  plugged in without feeding the supply back into the PC, but I haven't
-  confirmed it on the schematic. Measure before relying on it: with only the
-  supply connected, the USB-C socket's VBUS should read well below 5 V.
-  The XIAO's 3.3 V regulator (XC6206, about 200 mA by the same source) runs
-  the board only, so don't power anything else from its 3V3 pad.
-  Its BAT+/BAT− pads on the back take a single LiPo cell only.
+- A Seeed XIAO can instead take the supply on its 5V pad, but treat that pad
+  as wired straight to the USB-C socket's VBUS (Seeed lists it as VBUS, and
+  recommends a Schottky diode on external 5 V inputs). If a data cable to the
+  PC or Switch may be plugged in while the pad is supplied, put a Schottky
+  (1N5819, SS14 or SS34) in series from the supply to the pad, or the supply
+  feeds back into that USB port. Otherwise power each XIAO by USB or by the
+  pad, never both. Don't power other parts from the XIAO's 3V3 pad; its
+  regulator is sized for the board. The BAT+/BAT− pads on the back take a
+  single LiPo cell only.
 - Never power the nRF boards from the hub's ports, because they would
   enumerate on the bridge.
 - Optional: run the Nucleo from the supply too, by moving jumper JP5 to E5V
