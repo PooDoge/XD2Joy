@@ -5145,17 +5145,46 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.security_changed = security_changed,
 };
 
+/* What the last fatal error was, kept in RAM across the reset below so the next boot can print
+ * it (CONFIG_LOG is off, so nothing else records it). */
+#define JC_CRASH_MAGIC 0x4A43464CU
+static __noinit struct {
+	uint32_t magic;
+	uint32_t reason;
+	uint32_t pc;
+	uint32_t lr;
+} jc_crash;
+
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
-	ARG_UNUSED(reason);
-	ARG_UNUSED(esf);
+	jc_crash.magic = JC_CRASH_MAGIC;
+	jc_crash.reason = reason;
+	jc_crash.pc = esf ? esf->basic.pc : 0;
+	jc_crash.lr = esf ? esf->basic.lr : 0;
 	NVIC_SystemReset();
+}
+
+/* Why the chip last reset (RESETREAS bits: 0x1 pin, 0x2 watchdog, 0x4 soft reset or fatal
+ * error, 0x8 lockup, 0x0 power on or brownout) and, after a fatal error, where it happened. */
+static void reset_cause_print(void)
+{
+	uint32_t why = NRF_POWER->RESETREAS;
+
+	NRF_POWER->RESETREAS = why;
+	if (jc_crash.magic == JC_CRASH_MAGIC) {
+		printk("[RESET] reas 0x%08x fatal %u pc 0x%08x lr 0x%08x\n", why, jc_crash.reason,
+		       jc_crash.pc, jc_crash.lr);
+	} else {
+		printk("[RESET] reas 0x%08x\n", why);
+	}
+	jc_crash.magic = 0;
 }
 
 int main(void)
 {
 	int err;
 
+	reset_cause_print();
 	{ extern void chip_addr(uint8_t addr[6]); chip_addr(FAKE_ADDR); } bt_ctlr_set_public_addr(FAKE_ADDR);
 
 	err = bt_enable(NULL);
