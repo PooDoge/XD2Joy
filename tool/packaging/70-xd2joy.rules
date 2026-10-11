@@ -1,0 +1,5 @@
+# XD2Joy boards (Zephyr VID 0x2FE3, PID 0x0005 left, 0x0004 right).
+# Lets the logged-in user open the boards' serial ports without joining dialout/uucp, and stops
+# ModemManager from probing them with AT commands right after they are plugged in.
+# Install: sudo cp 70-xd2joy.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2fe3", ATTRS{idProduct}=="0004|0005", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"

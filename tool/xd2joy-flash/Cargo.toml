@@ -1,0 +1,15 @@
+[package]
+name = "xd2joy-flash"
+description = "Checking UF2 images and copying them to a board's bootloader drive."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sysinfo.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

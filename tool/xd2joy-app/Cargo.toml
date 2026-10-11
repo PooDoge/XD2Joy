@@ -1,0 +1,23 @@
+[package]
+name = "xd2joy"
+description = "Desktop configuration and firmware update tool for XD2Joy boards."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+xd2joy-proto = { path = "../xd2joy-proto" }
+xd2joy-device = { path = "../xd2joy-device" }
+xd2joy-flash = { path = "../xd2joy-flash" }
+freya.workspace = true
+futures-channel.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+rfd = "0.17.2"
+tracing-appender = "0.2"
+dirs = "6"
+open = "5"

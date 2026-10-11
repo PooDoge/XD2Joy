@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["xd2joy-proto", "xd2joy-device", "xd2joy-flash", "xd2joy-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.88"
+
+[workspace.dependencies]
+freya = { version = "=0.5.0-rc.8" }
+serialport = "4"
+sysinfo = { version = "0.37", default-features = false, features = ["disk"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-channel = "0.3"
+futures-util = "0.3"
+tempfile = "3"
+serde_json = "1"
