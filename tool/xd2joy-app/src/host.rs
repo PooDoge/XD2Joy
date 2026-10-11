@@ -893,7 +893,13 @@ impl<B: Bus> Host<B> {
         }
 
         self.emit(HostEvent::Flash(FlashStage::Copying { side, drive: drive.mount.clone() }));
-        self.bus.copy(&drive.mount, &image)?;
+        self.bus.copy(&drive.mount, &image).map_err(|e| {
+            format!(
+                "{e}. The board is still in its bootloader with the drive at {}: copy the file onto that drive \
+                 by hand, or unplug and replug the board to try again.",
+                drive.mount.display()
+            )
+        })?;
 
         self.emit(HostEvent::Flash(FlashStage::WaitingForBoard { side }));
         let deadline = Instant::now() + BOARD_WAIT;
@@ -904,7 +910,9 @@ impl<B: Bus> Host<B> {
             }
             if Instant::now() >= deadline {
                 return Err("the firmware was copied but the board did not come back as an XD2Joy board. \
-                            Check that the file was built for this side."
+                            Unplug it and plug it back in. If its bootloader drive shows up again, copy the \
+                            file onto it by hand; if nothing shows up, check the file was built for this \
+                            side and this kind of board."
                     .into());
             }
         }

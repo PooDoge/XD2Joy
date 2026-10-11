@@ -7,6 +7,7 @@ use std::{
     fs::File,
     io::Write,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use crate::{FlashError, Uf2Image};
@@ -14,6 +15,9 @@ use crate::{FlashError, Uf2Image};
 const INFO_FILE: &str = "INFO_UF2.TXT";
 /// The bootloader ignores the name; this one makes it obvious in a file manager what happened.
 const TARGET_NAME: &str = "XD2JOY.UF2";
+/// After a write error, how long the drive gets to disappear before the error counts.
+const LEAVE_WAIT: Duration = Duration::from_secs(5);
+const LEAVE_POLL: Duration = Duration::from_millis(100);
 
 /// What `INFO_UF2.TXT` says about the bootloader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -117,20 +121,37 @@ pub fn new_drive(before: &[BootDrive], now: &[BootDrive]) -> Option<BootDrive> {
     }
 }
 
-/// Write the image to the drive. The board restarts as soon as it has the last block, and some
-/// systems then report an error closing or syncing a file on a drive that is gone; once every byte
-/// was handed over, that error is logged and the copy counts as done.
+/// Write the image to the drive. The bootloader restarts the board as soon as it has the last
+/// block, often before the system has finished writing or closing the file, and the system then
+/// reports an I/O error for a drive that is gone. So an error after the file was created only
+/// counts if the drive is still there [`LEAVE_WAIT`] later; if it left, the board took the image,
+/// and the caller confirms that by waiting for the board to come back.
 pub fn copy_image(drive: &Path, image: &Uf2Image) -> Result<(), FlashError> {
+    copy_until_gone(drive, image, || list_boot_drives().iter().any(|d| d.mount == drive), LEAVE_WAIT)
+}
+
+fn copy_until_gone(
+    drive: &Path,
+    image: &Uf2Image,
+    still_mounted: impl Fn() -> bool,
+    wait: Duration,
+) -> Result<(), FlashError> {
     let path = drive.join(TARGET_NAME);
     let write_err = |source| FlashError::Write { path: path.clone(), source };
     let mut file = File::create(&path).map_err(write_err)?;
-    file.write_all(image.bytes()).map_err(write_err)?;
-    if let Err(e) = file.flush().and_then(|()| file.sync_all()) {
-        if drive.join(INFO_FILE).exists() {
+    let written = file.write_all(image.bytes()).and_then(|()| file.flush()).and_then(|()| file.sync_all());
+    drop(file);
+    let Err(e) = written else {
+        return Ok(());
+    };
+    let deadline = Instant::now() + wait;
+    while still_mounted() {
+        if Instant::now() >= deadline {
             return Err(write_err(e));
         }
-        tracing::info!(path = %path.display(), error = %e, "the drive left while syncing; the board took the image");
+        std::thread::sleep(LEAVE_POLL);
     }
+    tracing::info!(path = %path.display(), error = %e, "the drive left during the copy; the board restarted with the image");
     Ok(())
 }
 
@@ -203,6 +224,19 @@ mod tests {
         let img = Uf2Image::parse(image(2, 0x1000, FAMILY_NRF52840))?;
         copy_image(dir.path(), &img)?;
         assert_eq!(std::fs::read(dir.path().join(TARGET_NAME))?, img.bytes());
+        Ok(())
+    }
+
+    /// `/dev/full` fails every write, like a drive whose board restarted mid-copy.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_write_error_counts_only_while_the_drive_stays() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        std::os::unix::fs::symlink("/dev/full", dir.path().join(TARGET_NAME))?;
+        let img = Uf2Image::parse(image(2, 0x1000, FAMILY_NRF52840))?;
+        copy_until_gone(dir.path(), &img, || false, Duration::from_millis(50))?;
+        let stayed = copy_until_gone(dir.path(), &img, || true, Duration::from_millis(50));
+        assert!(matches!(stayed, Err(FlashError::Write { .. })));
         Ok(())
     }
 }
