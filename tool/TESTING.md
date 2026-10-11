@@ -5,7 +5,7 @@ walks through a first run on the real thing, roughly in the order things depend 
 Each step says what you should see; anything else is worth a note and the log file (see
 [Reporting a problem](#reporting-a-problem)).
 
-Plan on about an hour for everything. Sections 1 to 4 are the minimum; the later ones can be done
+Plan on about an hour for everything. Sections 0 to 4 are the minimum; the later ones can be done
 in any order.
 
 ## 0. What you need
@@ -13,31 +13,128 @@ in any order.
 - Both nRF52840 boards, wired as in the main README, each with its own USB cable to the computer.
 - The Bluetooth keyboard and mouse you normally use with them.
 - The Switch 2, for the last checks.
-- Rust 1.88 or newer (`rustup update stable`).
-- On Linux: `libudev-dev` and the GL/EGL/Wayland/xkbcommon/fontconfig development packages:
+- Rust 1.88 or newer, from [rustup](https://rustup.rs) (distro packages are often older).
 
-  ```sh
-  sudo apt-get install -y libudev-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
-      libwayland-dev libxkbcommon-dev libfontconfig-dev
-  ```
+The same guide, with a system picker and tick boxes, is published as a page:
+<https://claude.ai/artifact/CQimseXZLQKx17A1TbBY8a> (private until shared).
 
-  Then either join the `dialout` group (`uucp` on Arch; log out and in again) or install the udev
-  rule, which also keeps ModemManager from poking the boards:
+### Bazzite, Silverblue, Kinoite, Aurora, Bluefin (Fedora Atomic)
 
-  ```sh
-  sudo cp tool/packaging/70-xd2joy.rules /etc/udev/rules.d/
-  sudo udevadm control --reload && sudo udevadm trigger
-  ```
+Nothing is layered onto the host. Build tools go in a distrobox; Rust and Zephyr go in your home
+folder. A distrobox shares your home, `/dev`, `/run/udev` and `/run/media` with the host and keeps
+your user ID, so the box sees the boards and the `NICENANO` drive.
 
-- On macOS and Windows nothing extra; the boards are standard USB serial devices.
-
-Get the code:
+On the **host**, once: get the code and give your user access to the boards. The udev rule is a file
+in `/etc`, which stays writable; it also keeps ModemManager away from the boards.
 
 ```sh
-git clone https://github.com/PooDoge/XD2Joy.git
-cd XD2Joy
-git checkout claude/project-thread-5idf6y
+git clone https://github.com/PooDoge/XD2Joy.git ~/XD2Joy
+cd ~/XD2Joy && git checkout claude/project-thread-5idf6y
+sudo cp tool/packaging/70-xd2joy.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+# replug both boards, then expect "user:<you>:rw-":
+getfacl /dev/ttyACM0 | grep "user:$USER"
 ```
+
+The rule grants access to your user rather than the `dialout` group. On Fedora Atomic `dialout`
+is only in `/usr/lib/group`, so joining it takes
+[extra steps](https://docs.bazzite.gg/Advanced/add-user-to-group/), and rootless containers don't
+reliably pass host groups through to devices.
+
+Create a box on the same Fedora release as the host, so what it builds also runs on the host:
+
+```sh
+distrobox create --name xd2joy --image registry.fedoraproject.org/fedora-toolbox:$(rpm -E %fedora)
+distrobox enter xd2joy
+```
+
+In the **box** (`dnf` here only changes the box):
+
+```sh
+sudo dnf install -y gcc gcc-c++ pkgconf-pkg-config git curl \
+    systemd-devel fontconfig-devel freetype-devel \
+    mesa-libEGL-devel mesa-libGL-devel libxkbcommon-devel wayland-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # into ~/.cargo
+source ~/.cargo/env
+cd ~/XD2Joy/tool
+cargo test --workspace
+cargo build --release -p xd2joy
+```
+
+If `which cargo` points into `/home/linuxbrew`, Bazzite's Homebrew Rust is ahead of rustup on your
+`PATH`; use `~/.cargo/bin/cargo`.
+
+Run the result on the **host**, where the GPU driver, file dialogs and drive automount are the
+system's own; it only needs libraries Bazzite already has:
+
+```sh
+~/XD2Joy/tool/target/release/xd2joy
+```
+
+If the host reports a missing library, run `cargo run --release -p xd2joy` in the box instead (on an
+NVIDIA image, create the box with `--nvidia`).
+
+For the firmware (section 3), in the same box:
+
+```sh
+sudo dnf install -y cmake ninja-build dtc python3-pip python3-devel wget xz file
+python3 -m venv ~/zephyr-venv && source ~/zephyr-venv/bin/activate
+pip install west
+```
+
+Then follow the main README's Zephyr workspace steps from `git clone …zephyr` onwards, skipping its
+`pip install west cmake ninja` line, with the workspace in your home (`~/zephyrproject`). The
+`NICENANO` drive mounts at `/run/media/$USER/NICENANO` on the host and at the same path in the box.
+
+### Fedora Workstation
+
+```sh
+sudo dnf install -y gcc gcc-c++ pkgconf-pkg-config git curl \
+    systemd-devel fontconfig-devel freetype-devel \
+    mesa-libEGL-devel mesa-libGL-devel libxkbcommon-devel wayland-devel
+```
+
+Firmware tools: `sudo dnf install -y cmake ninja-build dtc python3-pip python3-devel wget xz file`.
+
+### Ubuntu, Debian, Mint, Pop!_OS
+
+```sh
+sudo apt-get install -y build-essential pkg-config git curl libudev-dev \
+    libfontconfig-dev libfreetype-dev libegl1-mesa-dev libgl1-mesa-dev \
+    libgles2-mesa-dev libwayland-dev libxkbcommon-dev
+```
+
+Firmware tools: `sudo apt-get install -y cmake ninja-build device-tree-compiler python3-venv python3-dev wget xz-utils file`.
+
+### Arch, EndeavourOS, Manjaro
+
+```sh
+sudo pacman -S --needed base-devel git curl rustup \
+    systemd-libs fontconfig freetype2 mesa libxkbcommon wayland
+rustup default stable
+```
+
+Firmware tools: `sudo pacman -S --needed cmake ninja dtc python python-pip wget xz file`. On
+SteamOS, whose root is read-only, follow the Fedora Atomic steps with a `fedora-toolbox:latest` box
+and run the app from inside the box.
+
+### Every Linux system without a box
+
+Install Rust with rustup, get the code, and install the udev rule (or join the serial group:
+`dialout`, or `uucp` on Arch, then log out and in):
+
+```sh
+git clone https://github.com/PooDoge/XD2Joy.git ~/XD2Joy
+cd ~/XD2Joy && git checkout claude/project-thread-5idf6y
+sudo cp tool/packaging/70-xd2joy.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger   # then replug the boards
+```
+
+### macOS and Windows
+
+Nothing extra beyond Rust (`xcode-select --install` first on macOS; the Visual Studio C++ build
+tools on Windows, which rustup offers). The boards are standard USB serial devices. Get the code
+with the `git clone` and `git checkout` lines above.
 
 ## 1. Back up what the boards hold now
 
@@ -51,10 +148,13 @@ Close the web tool's tab afterwards: only one program can have a board's serial 
 ## 2. Build and try the demo
 
 ```sh
-cd tool
+cd ~/XD2Joy/tool
 cargo test --workspace     # should end with every "test result: ok"
 XD2JOY_DEMO=1 cargo run --release -p xd2joy
 ```
+
+On Fedora Atomic, run the tests in the box and the app on the host:
+`XD2JOY_DEMO=1 ~/XD2Joy/tool/target/release/xd2joy`.
 
 The first build takes a few minutes. The window opens on two simulated boards. Click through every
 page to check that it draws properly on your system. Nothing you do here reaches the real boards,
@@ -72,8 +172,8 @@ The tool needs two console commands that the firmware on this branch adds: `ver`
 `bootloader`. Build it as in the main README ("Building"):
 
 ```sh
-cd ..    # back to the repo root
-ZEPHYR_WORKSPACE=/path/to/zephyrproject bash firmware/build.sh
+cd ~/XD2Joy
+ZEPHYR_WORKSPACE=~/zephyrproject bash firmware/build.sh
 ```
 
 Flash `firmware/out/xd2joy_LEFT.uf2` and `xd2joy_RIGHT.uf2` the usual way (RST to GND twice, then
