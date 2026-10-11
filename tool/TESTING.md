@@ -363,7 +363,9 @@ To start from a clean slate (forget the remembered board configs), delete `board
 
 - The XIAO build has compiled and passed the build script's checks, but has not run on a XIAO yet.
   The board-link pins (D6/D7) and the USB bridge input (D0) were chosen for this port; the red LED
-  is the keyboard-mode light.
+  is the keyboard-mode light. It runs Bluetooth timing from the XIAO's 32.768 kHz crystal; if a
+  board shows no serial port or never connects over Bluetooth, rebuild with `XD2JOY_CLOCK=rc` and
+  note which build worked.
 - The right half's **RS** (stick press) and **GR** masks are inferred, not confirmed. Check both
   on the console in section 5 step 10.
 - The **input** setting (Auto / Bluetooth / USB) only appears on the Boards page for firmware that

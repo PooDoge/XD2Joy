@@ -11,6 +11,16 @@ case "${XD2JOY_BOARD:-promicro}" in
 esac
 XIAO=0
 case "$BOARD" in xiao_ble*) XIAO=1 ;; esac
+# the XIAO runs its 32 kHz clock from its crystal; XD2JOY_CLOCK=rc uses the RC oscillator like a Pro Micro
+case "${XD2JOY_CLOCK:-}" in
+  ""|xtal|rc) ;;
+  *) echo "STOP: XD2JOY_CLOCK must be xtal or rc"; exit 1 ;;
+esac
+if [ $XIAO -eq 0 ] && [ "${XD2JOY_CLOCK:-}" = xtal ]; then
+  echo "STOP: XD2JOY_CLOCK=xtal is for the XIAO only; $BOARD has no 32 kHz crystal"; exit 1
+fi
+CLOCK_RC=1
+if [ $XIAO -eq 1 ] && [ "${XD2JOY_CLOCK:-xtal}" = xtal ]; then CLOCK_RC=0; fi
 echo "board: $BOARD"
 DIR=build_xd2joy
 
@@ -37,6 +47,7 @@ failed=0
 for SIDE in RIGHT LEFT; do
   B="$DIR"
   ARGS=(-DJC_OUT=OFF)
+  if [ $CLOCK_RC -eq 1 ]; then ARGS+=(-DJC_CLOCK_RC=1); fi
   if [ "$SIDE" = LEFT ]; then B="${DIR}L"; ARGS+=(-DJC_LEFT=1); fi
   OUT="$ZP/$B/zephyr"
   echo "=== $SIDE  ($ZP/$B)"
@@ -46,11 +57,17 @@ for SIDE in RIGHT LEFT; do
 
   bad=0
   echo "--- checks"
-  check "$OUT/.config" '^CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION=y$' "RC calibration enabled"
-  check "$OUT/.config" '^CONFIG_CLOCK_CONTROL_NRF_DRIVER_CALIBRATION=y$' "calibration run by the clock driver"
-  check "$OUT/.config" '^CONFIG_CLOCK_CONTROL_NRF_USES_TEMP_SENSOR=y$' "temp triggered calibration"
-  check "$OUT/zephyr.dts" 'k32src = "rc";' "32 kHz source = RC oscillator"
-  check "$OUT/zephyr.dts" 'k32src-accuracy-ppm = < 0x1f4 >;' "accuracy 500 ppm (Bluetooth window sizing)"
+  if [ $CLOCK_RC -eq 1 ]; then
+    check "$OUT/.config" '^CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION=y$' "RC calibration enabled"
+    check "$OUT/.config" '^CONFIG_CLOCK_CONTROL_NRF_DRIVER_CALIBRATION=y$' "calibration run by the clock driver"
+    check "$OUT/.config" '^CONFIG_CLOCK_CONTROL_NRF_USES_TEMP_SENSOR=y$' "temp triggered calibration"
+    check "$OUT/zephyr.dts" 'k32src = "rc";' "32 kHz source = RC oscillator"
+    check "$OUT/zephyr.dts" 'k32src-accuracy-ppm = < 0x1f4 >;' "accuracy 500 ppm (Bluetooth window sizing)"
+  else
+    check "$OUT/zephyr.dts" 'k32src = "xtal";' "32 kHz source = the XIAO's crystal"
+    check "$OUT/zephyr.dts" 'k32src-accuracy-ppm = < 0x32 >;' "accuracy 50 ppm (Bluetooth window sizing)"
+    absent "$OUT/.config" '^CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION=y$' "no RC calibration"
+  fi
   check "$ZP/$B/compile_commands.json" 'JC_CONN_WIN_OFFSET=4 .*JC_CONN_WIN_SIZE=3 .*lll_scan\.c",$' "conn window patch on: CONNECT_IND (offset 4, size 3)"
   check "$ZP/$B/compile_commands.json" 'JC_CONN_WIN_OFFSET=4 .*JC_CONN_WIN_SIZE=3 .*ull_llcp_conn_upd\.c",$' "conn window patch on: connection update"
   check "$HERE/src/main.c" 'atomic_set_bit\(s->flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE\);' "per connection HID subscriptions (reconnect fix)"
@@ -59,6 +76,9 @@ for SIDE in RIGHT LEFT; do
     check "$OUT/zephyr.dts" 'psels = < 0x100002c >;' "wire RX on D7 (P1.12)"
     absent "$OUT/zephyr.dts" 'psels = < 0x9 >;|0x100000a|psels = < 0x24 >;|0x1000026' "no Pro Micro wire pins left"
     check "$OUT/zephyr.dts" 'code_partition: partition@27000' "starts at 0x27000, after the XIAO's SoftDevice 7.3.0"
+    absent "$OUT/zephyr.map" 'qspi_nor_init' "external QSPI flash driver left out"
+    check "$OUT/zephyr.dts" 'gpio-hog;' "flash chip select (P0.25) held high"
+    check "$OUT/.config" '^CONFIG_GPIO_HOGS=y$' "GPIO hog support built in"
   elif [ "$SIDE" = LEFT ]; then
     check "$OUT/zephyr.dts" 'psels = < 0x9 >;' "wire TX on P0.09 (dev board)"
     check "$OUT/zephyr.dts" 'psels = < 0x100000a >;' "wire RX on P0.10 (Dev board)"
@@ -79,6 +99,13 @@ for SIDE in RIGHT LEFT; do
     check "$OUT/zephyr.dts" 'psels = < 0x1000008 >;' "USB bridge RX on P0.08"
   fi
   check "$OUT/.config" '^CONFIG_UART_1_ASYNC=y$' "USB bridge UART uses DMA receive"
+  # the bootloader clears RAM from 0x20008000 and writes 0x20007F7C on every reset
+  crash_at=$(awk '/^ \.noinit_jc_crash/ { getline; print $1; exit }' "$OUT/zephyr.map")
+  if [ -n "$crash_at" ] && [ $((crash_at + 16)) -le $((0x20007F7C)) ]; then
+    echo "  ok    crash record at $crash_at, below the RAM the bootloader touches"
+  else
+    echo "  FAIL  crash record at ${crash_at:-?}, must end by 0x20007F7C"; bad=1
+  fi
   check "$OUT/.config" '^CONFIG_BT_CTLR_TX_PWR_DBM=8$' "transmit power +8 dBm"
   absent "$OUT/zephyr.elf" 'LTK =' "private log no pairing key print left"
   absent "$OUT/zephyr.elf" ' keys=%02X' "private log, no key codes in the status line"

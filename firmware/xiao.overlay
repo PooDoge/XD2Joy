@@ -10,6 +10,7 @@
  * The Pro Micro bridge pins (P0.06, P0.08) are not on the XIAO's edge, and P0.06 is its blue LED.
  */
 
+#include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
 
 &pinctrl {
@@ -61,6 +62,22 @@
 
 &qspi {
 	status = "disabled";
+};
+
+/* The flash chip node stays "okay" under a disabled &qspi, and that alone builds and starts the
+ * QSPI flash driver (Zephyr instantiates nodes by their own status), so turn the chip off too. */
+&p25q16h {
+	status = "disabled";
+};
+
+/* With the flash driver gone nothing drives the chip's chip select (P0.25). Hold it high, chip
+ * deselected, as Seeed's own Arduino core does at boot, rather than leave it floating. */
+&gpio0 {
+	flash_cs_hog {
+		gpio-hog;
+		gpios = <25 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
 };
 
 &ieee802154 {

@@ -70,7 +70,8 @@ boards use the same pads, so wire them crosswise:
 | GND | GND |
 
 To enter the bootloader, double-press the small reset button; a drive named **XIAO-SENSE** (on
-the Sense) appears instead of NICENANO. The red LED is the keyboard-mode
+the Sense) appears instead of NICENANO. A new XIAO with no firmware on it shows that drive as
+soon as it is plugged in. The red LED is the keyboard-mode
 light. The XIAO's bootloader keeps SoftDevice 7.3.0, so its firmware starts at 0x27000 instead of
 the Pro Micro's 0x26000: firmware built for one kind of board does not run on the other.
 
@@ -173,6 +174,11 @@ For Seeed XIAO nRF52840 boards (Sense or not):
 ```sh
 XD2JOY_BOARD=xiao ZEPHYR_WORKSPACE="$PWD/zephyrproject" bash firmware/build.sh
 ```
+
+The XIAO build runs Bluetooth timing from the board's 32.768 kHz crystal, which Pro Micro clones
+don't have. If a XIAO build misbehaves (no USB serial port, or Bluetooth never connects), double-press reset to get the drive back and try
+`XD2JOY_CLOCK=rc` in front of the command above to use the RC oscillator like a Pro Micro, and
+report it.
 
 If it worked it should be in `firmware/out/` :
 
