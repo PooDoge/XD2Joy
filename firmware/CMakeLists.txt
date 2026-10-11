@@ -53,6 +53,7 @@ target_sources(app PRIVATE
     src/chip_addr.c
     src/console_keep.c
     src/main.c
+    src/bridge.c
     src/hci_user_ext.c)
 target_include_directories(app PRIVATE
     ${ZEPHYR_BASE}/subsys/bluetooth/controller

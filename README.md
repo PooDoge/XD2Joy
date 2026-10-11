@@ -36,6 +36,7 @@ consumer friendly version that is in development and is ran on this same firmwar
 - **Wake:** Wake up the console with home button.
 - **Reconnecting:** If you do a soft removal of the paired devices they reconnect back to the console based on if you interact with them like a Joy-Con would.
 - **Colors:** You can change Joy-Con colors when the devices are paired to the console.
+- **Wired USB (optional):** A wired keyboard and/or a 2.4 GHz mouse receiver can be used through a small USB host bridge board. See [bridge/README.md](bridge/README.md).
 
 
 <img src="Pair.jpg" width="900">
