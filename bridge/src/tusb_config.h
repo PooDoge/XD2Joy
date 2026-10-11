@@ -18,6 +18,23 @@
 
 #define CFG_TUH_ENABLED 1
 
+#if CFG_TUSB_MCU == OPT_MCU_RP2040
+// XIAO RP2040: the host is a software (PIO) USB port on rhport 1, and the
+// native USB-C port is a device carrying the log as a CDC serial port.
+#define CFG_TUH_RPI_PIO_USB 1
+#define BOARD_TUH_RHPORT 1
+#define BOARD_TUD_RHPORT 0
+#define CFG_TUD_ENABLED 1
+#define CFG_TUD_MAX_SPEED OPT_MODE_DEFAULT_SPEED
+#define CFG_TUD_MEM_SECTION
+#define CFG_TUD_MEM_ALIGN __attribute__((aligned(4)))
+#define CFG_TUD_ENDPOINT0_SIZE 64
+#define CFG_TUD_CDC 1
+#define CFG_TUD_CDC_RX_BUFSIZE 64
+#define CFG_TUD_CDC_TX_BUFSIZE 1024
+#define CFG_TUD_CDC_EP_BUFSIZE 64
+#endif
+
 #ifndef BOARD_TUH_RHPORT
 #define BOARD_TUH_RHPORT 0
 #endif

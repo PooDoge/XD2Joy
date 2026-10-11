@@ -3,6 +3,11 @@
 #include "bridge_proto.h"
 #include "link.h"
 
+/*
+ *   LINK_LEFT : USART1 TX on PB6 (Arduino D10) -> left board
+ *   LINK_RIGHT: USART6 TX on PC6 (CN10 pin 4)  -> right board
+ */
+
 /* 256-entry ring indexed by uint8_t so the indices wrap for free. */
 typedef struct {
 	USART_TypeDef *usart;
@@ -78,6 +83,10 @@ void link_init(void)
 	/* USART1 and USART6 both sit on APB2 (84 MHz) */
 	usart_setup(USART1, USART1_IRQn);
 	usart_setup(USART6, USART6_IRQn);
+}
+
+void link_task(void)
+{
 }
 
 bool link_send(link_port_t port, uint8_t type, const uint8_t *payload, uint8_t len)

@@ -1,0 +1,3 @@
+set(PICO_PLATFORM rp2040)
+set(PICO_BOARD seeed_xiao_rp2040)
+set(CFG_TUH_RPI_PIO_USB 1)

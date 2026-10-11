@@ -17,7 +17,8 @@ work. Bluetooth keeps working too; see [Choosing the input](#choosing-the-input)
 ## Parts
 
 - NUCLEO-F446RE (any STM32F4 with USB OTG FS can be ported; the Blue Pill
-  STM32F103 cannot act as a USB host)
+  STM32F103 cannot act as a USB host), or a Seeed XIAO RP2040 (see
+  [Using a XIAO RP2040 instead](#using-a-xiao-rp2040-instead))
 - USB-A female breakout board
 - A small USB hub if you want a keyboard *and* a mouse receiver. Use a powered
   hub for RGB keyboards (see Power below). Devices behind the hub should be
@@ -92,10 +93,58 @@ bash bridge/build.sh
 
 The first run downloads TinyUSB (pinned to a fixed commit) into
 `bridge/.deps/`. Then plug the Nucleo into a computer: it shows up as a drive
-named **NOD_F446RE**. Drag `bridge/out/xd2joy_bridge.bin` onto it.
+named **NOD_F446RE**. Drag `bridge/out/nucleo/xd2joy_bridge.bin` onto it.
 
 Rebuild and flash the XD2Joy boards from this branch as well. They need the
 new UART1 receiver.
+
+## Using a XIAO RP2040 instead
+
+A Seeed XIAO RP2040 can replace the Nucleo. It is thumbnail-sized, and it
+doesn't have the STM32's low-speed-through-a-hub bug, because its USB host
+port is software running on the RP2040's PIO blocks (the
+[Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) library). The
+nRF boards can't tell the difference: same frames, same 1 Mbaud, same input
+pin, so their firmware doesn't change.
+
+This port builds, but hasn't been run on hardware yet.
+
+**Wiring** (pads seen from the top, USB-C up):
+
+| XIAO RP2040 pad | GPIO | To |
+|---|---|---|
+| D0 | GPIO26 | USB-A socket D+ |
+| D1 | GPIO27 | USB-A socket D− |
+| D6 | GPIO0 (UART0 TX) | 1 kΩ, then the **left** nRF board's bridge input (D0 on a XIAO nRF52840) |
+| D9 | GPIO4 (UART1 TX) | 1 kΩ, then the **right** nRF board's bridge input (D0 on a XIAO nRF52840) |
+| GND | | USB-A socket GND, both nRF boards' GND |
+
+- Power the USB-A socket's VBUS from 5 V that doesn't pass through the XIAO:
+  the fused supply rail (see
+  [Powering everything from one 5 V supply](#powering-everything-from-one-5-v-supply)).
+  Treat the XIAO's own 5V pad as wired to its USB-C VBUS, like the nRF
+  boards' 5V pads: USB or the pad, or the pad through a Schottky diode.
+- D+ and D− are bit-banged at 12 Mbit/s, so keep those two wires under about
+  10 cm and twisted together.
+- The keyboard and the mouse receiver still share the one port through a hub.
+  Low-speed devices behind the hub are fine here.
+
+**Build and flash:**
+
+```sh
+bash bridge/build.sh xiao-rp2040
+```
+
+The first run also downloads the Pico SDK (2.1.1) and builds its `picotool`
+helper. Hold the XIAO's **B** (boot) button while plugging it in: it shows up
+as a drive named **RPI-RP2**. Drag `bridge/out/xiao-rp2040/xd2joy_bridge.uf2`
+onto it.
+
+**Checking it works:** the XIAO's USB-C port is now a serial port named
+*XD2Joy USB bridge* (any baud rate). Open it to see the same `[USB]` and
+`[HID]` log lines as the Nucleo prints. The banner repeats each time a
+terminal connects. The blue LED blinks slowly while waiting for devices and
+fast while forwarding input.
 
 ## Checking it works
 
