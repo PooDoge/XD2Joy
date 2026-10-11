@@ -17,10 +17,10 @@ pub mod raw;
 mod reply;
 
 pub use blob::{Colours, ConfigBlob, Entry, Rgb};
-pub use command::{Command, Slot};
-pub use mapping::{Binding, Hotkey, Mapping, Source, StickSource, Tuning};
+pub use command::{Command, PEER_NAME_MAX, PROFILE_NAME_MAX, Slot};
 pub use joycon::{Button, StickDir, Target};
 pub use lines::{LineSplitter, split_glued};
+pub use mapping::{Binding, Hotkey, Mapping, Source, StickSource, Tuning};
 pub use reply::{
     AddrType, BtAddr, CfgReply, DeviceKind, FirmwareInfo, HidState, InputStatus, LinkEvent, MapReply, ParseError,
     PeerReply, ProfileReply, ProfileSlot, RawReport, Reply, ScanDevice, ScanReply, SyncStatus, parse_line,

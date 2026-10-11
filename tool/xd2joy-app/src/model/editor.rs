@@ -36,12 +36,22 @@ pub struct Editor {
     undo: Vec<Mapping>,
     redo: Vec<Mapping>,
     pub capture: Capture,
+    /// The slider or picker being dragged: its steps share one undo entry.
+    drag: Option<&'static str>,
 }
 
 impl Default for Editor {
     fn default() -> Self {
         let m = Mapping::firmware_default();
-        Editor { baseline: m.clone(), edit: m, loaded: [false; 2], undo: Vec::new(), redo: Vec::new(), capture: Capture::Idle }
+        Editor {
+            baseline: m.clone(),
+            edit: m,
+            loaded: [false; 2],
+            undo: Vec::new(),
+            redo: Vec::new(),
+            capture: Capture::Idle,
+            drag: None,
+        }
     }
 }
 
@@ -83,6 +93,7 @@ impl Editor {
 
     /// Make a change with undo. The closure's error leaves the mapping as it was.
     pub fn change<T, E>(&mut self, f: impl FnOnce(&mut Mapping) -> Result<T, E>) -> Result<T, E> {
+        self.drag = None;
         let before = self.edit.clone();
         match f(&mut self.edit) {
             Ok(v) => {
@@ -102,7 +113,23 @@ impl Editor {
         }
     }
 
+    /// A step of a drag (a slider, a colour picker). Only the first step since another change
+    /// makes an undo entry, so one undo goes back to before the drag.
+    pub fn tweak(&mut self, what: &'static str, f: impl FnOnce(&mut Mapping)) {
+        let before = self.edit.clone();
+        f(&mut self.edit);
+        if self.edit != before && self.drag != Some(what) {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_DEPTH {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        self.drag = Some(what);
+    }
+
     fn push_undo(&mut self) {
+        self.drag = None;
         self.undo.push(self.edit.clone());
         self.redo.clear();
     }
@@ -116,12 +143,14 @@ impl Editor {
     }
 
     pub fn undo(&mut self) {
+        self.drag = None;
         if let Some(prev) = self.undo.pop() {
             self.redo.push(std::mem::replace(&mut self.edit, prev));
         }
     }
 
     pub fn redo(&mut self) {
+        self.drag = None;
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.edit, next));
         }
@@ -273,7 +302,11 @@ pub fn conflicts(edit: &Mapping, hotkeys: &[NamedHotkey], sync: Option<Hotkey>) 
     for h in hotkeys {
         let targets: Vec<String> = edit.targets_of(Source::Key(h.key.key)).map(target_name).collect();
         if !targets.is_empty() && h.key.mods != 0 {
-            out.push(format!("{} also presses {}, because button bindings ignore modifiers.", h.key.label(), targets.join(" and ")));
+            out.push(format!(
+                "{} also presses {}, because button bindings ignore modifiers.",
+                h.key.label(),
+                targets.join(" and ")
+            ));
         } else if !targets.is_empty() {
             out.push(format!("{} ({}) also presses {}.", h.key.label(), h.what, targets.join(" and ")));
         }
@@ -292,6 +325,23 @@ mod tests {
             e.board_config(&ConfigBlob::firmware_default(side));
         }
         e
+    }
+
+    #[test]
+    fn a_drag_is_one_undo_step() {
+        let mut e = loaded();
+        for v in [300, 400, 500] {
+            e.tweak("gain", |m| m.tuning.mouse_gain = v);
+        }
+        e.tweak("accel", |m| m.tuning.accel = false);
+        e.tweak("gain", |m| m.tuning.mouse_gain = 600);
+        e.undo();
+        assert_eq!(e.edit.tuning.mouse_gain, 500);
+        e.undo();
+        assert!(e.edit.tuning.accel);
+        e.undo();
+        assert_eq!(e.edit.tuning, e.baseline.tuning);
+        assert!(!e.can_undo());
     }
 
     #[test]
@@ -318,7 +368,8 @@ mod tests {
         assert!(!e.board_config(&changed));
         assert_eq!(e.edit.tuning, xd2joy_proto::Tuning::FIRMWARE_FALLBACK);
         // now with an edit on the right board
-        let _ = e.bind(Source::mouse(xd2joy_proto::hid::MouseButton::Middle), Target::Button(Button::Home), BindMode::Add);
+        let _ =
+            e.bind(Source::mouse(xd2joy_proto::hid::MouseButton::Middle), Target::Button(Button::Home), BindMode::Add);
         let kept = e.board_config(&ConfigBlob::firmware_default(Side::Right));
         assert!(kept);
         assert!(e.edit.has_home());
@@ -347,7 +398,11 @@ mod tests {
     #[test]
     fn invalid_and_full_binds_explain_themselves() {
         let mut e = loaded();
-        let r = e.bind(Source::mouse(xd2joy_proto::hid::MouseButton::Left), Target::Stick(xd2joy_proto::StickDir::Up), BindMode::Add);
+        let r = e.bind(
+            Source::mouse(xd2joy_proto::hid::MouseButton::Left),
+            Target::Stick(xd2joy_proto::StickDir::Up),
+            BindMode::Add,
+        );
         assert_eq!(r, Err("Only keyboard keys can push the left stick.".into()));
         for k in 0x59..0x5E {
             assert!(e.bind(Source::Key(k), Target::Button(Button::L), BindMode::Add).is_ok());

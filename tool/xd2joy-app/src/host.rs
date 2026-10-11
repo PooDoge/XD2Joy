@@ -197,7 +197,8 @@ impl<B: Bus> Host<B> {
 
     fn fire_timers(&mut self) {
         let now = Instant::now();
-        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.timers).into_iter().partition(|(at, _)| *at <= now);
+        let (due, later): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.timers).into_iter().partition(|(at, _)| *at <= now);
         self.timers = later;
         for (_, timer) in due {
             match timer {
@@ -363,9 +364,7 @@ impl<B: Bus> Host<B> {
                 Some(f) => self.run_cmd(side, f),
                 None => Ok(Vec::new()),
             },
-            Outcome::TimedOut(_) => {
-                Err(format!("The {} board did not answer `{}`.", side_word(side), text.trim_end()))
-            }
+            Outcome::TimedOut(_) => Err(format!("The {} board did not answer `{}`.", side_word(side), text.trim_end())),
         }
     }
 
@@ -445,11 +444,10 @@ impl<B: Bus> Host<B> {
                 h.reload(side)?;
                 Ok(None)
             }),
-            Effect::Apply { side, blob, expected, save_slot } => {
-                self.job(&format!("Applying to the {} board", side_word(side)), |h| {
+            Effect::Apply { side, blob, expected, save_slot } => self
+                .job(&format!("Applying to the {} board", side_word(side)), |h| {
                     h.apply(side, &blob, expected.as_ref(), save_slot).map(Some)
-                })
-            }
+                }),
             Effect::RestoreDefaults(side) => {
                 self.job(&format!("Restoring the {} board", side_word(side)), |h| h.restore(side).map(Some))
             }
@@ -509,12 +507,9 @@ impl<B: Bus> Host<B> {
             }),
             Effect::Pin { side, addr, name } => self.job("Connecting the device", |h| {
                 let r = h.run_cmd(side, Command::PeerSet { addr, name })?;
-                let pinned = r.iter().any(|r| matches!(r, Reply::Peer(PeerReply::Pin(Some((a, _)))) if a.bytes == addr.bytes));
-                if pinned {
-                    Ok(None)
-                } else {
-                    Err(format!("The {} board did not take the device.", side_word(side)))
-                }
+                let pinned =
+                    r.iter().any(|r| matches!(r, Reply::Peer(PeerReply::Pin(Some((a, _)))) if a.bytes == addr.bytes));
+                if pinned { Ok(None) } else { Err(format!("The {} board did not take the device.", side_word(side))) }
             }),
             Effect::Unpin(side) => self.job("Forgetting the device", |h| {
                 h.run_cmd(side, Command::PeerClear)?;
@@ -547,7 +542,13 @@ impl<B: Bus> Host<B> {
     }
 
     /// Read, check nothing changed underneath, write, read back, and save the active profile.
-    fn apply(&mut self, side: Side, blob: &ConfigBlob, expected: Option<&ConfigBlob>, save: Option<Slot>) -> Job<String> {
+    fn apply(
+        &mut self,
+        side: Side,
+        blob: &ConfigBlob,
+        expected: Option<&ConfigBlob>,
+        save: Option<Slot>,
+    ) -> Job<String> {
         self.may_write(side)?;
         let current = self.read_cfg(side)?;
         if expected.is_some_and(|e| *e != current) {
@@ -601,7 +602,9 @@ impl<B: Bus> Host<B> {
         // the left board tells the right one; either works, the left is preferred
         let side = self.live_sides().first().copied().ok_or("Connect a board first.")?;
         let replies = self.run_cmd(side, Command::ProfileLoad(slot))?;
-        let switched = replies.iter().any(|r| matches!(r, Reply::Profile(ProfileReply::NowOn { slot: n, .. }) if *n == slot.number()));
+        let switched = replies
+            .iter()
+            .any(|r| matches!(r, Reply::Profile(ProfileReply::NowOn { slot: n, .. }) if *n == slot.number()));
         if !switched {
             return Err(format!("Profile {} is empty on the {} board.", slot.number(), side_word(side)));
         }
@@ -810,12 +813,7 @@ mod tests {
         rig.both_read();
         let mut stale = ConfigBlob::firmware_default(Side::Right);
         stale.entries.pop();
-        rig.host.send(Effect::Apply {
-            side: Side::Right,
-            blob: stale.clone(),
-            expected: Some(stale),
-            save_slot: None,
-        });
+        rig.host.send(Effect::Apply { side: Side::Right, blob: stale.clone(), expected: Some(stale), save_slot: None });
         let e = rig.wait("apply result", done);
         assert!(matches!(e, HostEvent::Failed(t) if t.contains("changed since it was loaded")));
         assert!(!rig.received(Side::Right).iter().any(|l| l.starts_with("cfg 55")));
@@ -868,7 +866,9 @@ mod tests {
         let n = got.len();
         assert_eq!(&got[n - 2..], ["peer C4:12:5A:77:10:01 random Keychron K3", "peer"]);
         assert!(rig.bus.world().boards[0].pin.is_some());
-        assert!(!rig.events.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|e| matches!(e, HostEvent::Failed(_))));
+        assert!(
+            !rig.events.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|e| matches!(e, HostEvent::Failed(_)))
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ mod editor;
 
 use std::{collections::VecDeque, path::PathBuf};
 
-pub use board::{BoardView, Firmware, Link, PairState, Profiles, pairing_tip};
+pub use board::{BoardView, Firmware, Link, PairState, pairing_tip};
 pub use editor::{BindMode, Capture, Editor, NamedHotkey, conflicts, target_name};
 use xd2joy_device::ConnectionEvent;
 use xd2joy_proto::raw::{LiveInput, Pressed};
@@ -177,7 +177,6 @@ impl FlashStage {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Page {
     #[default]
@@ -189,6 +188,22 @@ pub enum Page {
     Colours,
     Firmware,
     Advanced,
+}
+
+/// What the pointer is over on the mapper, so related things light up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hover {
+    Target(xd2joy_proto::Target),
+    Source(Source),
+}
+
+/// A shortcut being recorded from the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyFor {
+    Mode(Mode),
+    Profile(Slot),
+    /// The console unpair key: one key, no modifiers.
+    Unpair,
 }
 
 impl Page {
@@ -211,7 +226,7 @@ impl Page {
             Page::Hotkeys => "Shortcuts",
             Page::Tuning => "Stick & mouse",
             Page::Colours => "Colours",
-            Page::Firmware => "Firmware",
+            Page::Firmware => "Boards",
             Page::Advanced => "Advanced",
         }
     }
@@ -246,8 +261,27 @@ pub struct Model {
     pub notice: Option<Notice>,
     /// The host's current job.
     pub working: Option<String>,
-    /// Add instead of move when binding (Shift held while clicking, or the toggle).
+    /// Add instead of move when binding.
     pub add_mode: bool,
+    pub hover: Option<Hover>,
+    pub hotkey_capture: Option<HotkeyFor>,
+    /// Modifier bits held on this computer's keyboard (left and right told apart by key code).
+    pub pc_mods: u8,
+    /// A dangerous button pressed once; pressing it again does it.
+    pub armed: Option<String>,
+    /// Requests made by the model itself (a shortcut recorded from the board's keyboard); the
+    /// window sends them to the host.
+    pub outbox: Vec<Effect>,
+    /// Text being typed into fields, kept here so it survives page changes.
+    pub drafts: Drafts,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Drafts {
+    /// Profile names, by slot.
+    pub profile_names: [String; 4],
+    /// The Advanced page's blob field.
+    pub blob_hex: String,
 }
 
 impl Model {
@@ -439,7 +473,18 @@ impl Model {
             }
         }
         let mode = self.bind_mode();
-        for p in self.live.feed(side, r) {
+        let presses = self.live.feed(side, r);
+        if self.hotkey_capture.is_some() && side == Side::Left {
+            let mods = self.live.held_mods();
+            if let Some(key) = presses.iter().find_map(|p| match p {
+                Pressed::Key(k) => Some(*k),
+                _ => None,
+            }) {
+                self.finish_hotkey(Hotkey { key, mods });
+            }
+            return;
+        }
+        for p in presses {
             let source = match p {
                 Pressed::Key(k) => Source::Key(k),
                 Pressed::Modifiers(m) => Source::Modifiers(m),
@@ -452,6 +497,46 @@ impl Model {
                 Some(Err(text)) => self.error(text),
                 None => {}
             }
+        }
+    }
+}
+
+impl Model {
+    /// A shortcut was recorded: store it where it belongs. Mode shortcuts are part of the mapping
+    /// (applied with the rest); profile and unpair shortcuts are sent at once.
+    pub fn finish_hotkey(&mut self, key: Hotkey) {
+        let Some(target) = self.hotkey_capture.take() else { return };
+        let all: Vec<NamedHotkey> = self.hotkeys();
+        let clash = all.iter().find(|h| {
+            let own = match target {
+                HotkeyFor::Mode(m) => h.what == format!("{} mode", m.label()),
+                HotkeyFor::Profile(s) => h.what == format!("Profile {}", s.number()),
+                HotkeyFor::Unpair => false,
+            };
+            !own && h.key.clashes(key)
+        });
+        if let Some(h) = clash {
+            self.error(format!("{} is already the {} shortcut.", key.label(), h.what));
+            return;
+        }
+        match target {
+            HotkeyFor::Mode(mode) => {
+                self.editor.set_mode_key(mode, Some(key));
+                self.info(format!("{} toggles {} mode once applied.", key.label(), mode.label()));
+            }
+            HotkeyFor::Profile(slot) => self.outbox.push(Effect::ProfileKey { slot, key: Some(key) }),
+            HotkeyFor::Unpair => self.outbox.push(Effect::SyncKey(Some(Hotkey { key: key.key, mods: 0 }))),
+        }
+    }
+
+    /// The second press of a dangerous button: true when it should go ahead.
+    pub fn confirm(&mut self, what: &str) -> bool {
+        if self.armed.as_deref() == Some(what) {
+            self.armed = None;
+            true
+        } else {
+            self.armed = Some(what.to_owned());
+            false
         }
     }
 }
@@ -627,6 +712,35 @@ mod tests {
         let _ = m.editor.pick_target(Target::Button(Button::Home), BindMode::Move);
         m.apply(line_on(Side::Right, "[RAW] h=0x0020 len=4: 04 00 00 00"));
         assert!(m.editor.edit.has_home());
+    }
+
+    #[test]
+    fn shortcuts_record_and_refuse_clashes() {
+        let mut m = with_configs();
+        m.hotkey_capture = Some(HotkeyFor::Profile(Slot::new(1).expect("slot")));
+        // Ctrl+K is the keyboard mode shortcut
+        m.finish_hotkey(Hotkey { key: 0x0E, mods: 0x01 });
+        assert!(matches!(&m.notice, Some(Notice::Error(t)) if t.contains("Keyboard mode")));
+        assert!(m.outbox.is_empty());
+        m.hotkey_capture = Some(HotkeyFor::Profile(Slot::new(1).expect("slot")));
+        m.apply(line("[RAW] h=0x0012 len=8: 04 00 1E 00 00 00 00 00"));
+        assert_eq!(
+            m.outbox,
+            vec![Effect::ProfileKey { slot: Slot::new(1).expect("slot"), key: Some(Hotkey { key: 0x1E, mods: 0x04 }) }]
+        );
+        // a mode shortcut goes into the mapping instead
+        m.hotkey_capture = Some(HotkeyFor::Mode(Mode::Stick));
+        m.finish_hotkey(Hotkey { key: 0x0A, mods: 0x01 });
+        assert_eq!(m.editor.edit.mode_key(Mode::Stick), Some(Hotkey { key: 0x0A, mods: 0x01 }));
+        assert!(m.editor.dirty(Side::Left));
+    }
+
+    #[test]
+    fn dangerous_buttons_need_two_presses() {
+        let mut m = Model::default();
+        assert!(!m.confirm("restore L"));
+        assert!(m.confirm("restore L"));
+        assert!(!m.confirm("restore L"));
     }
 
     #[test]

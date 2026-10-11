@@ -85,7 +85,12 @@ impl FakeBoard {
     }
 
     fn sync_line(&self) -> String {
-        format!("[SYNC] shortcut key 0x{:02X} mods 0x{:02X} {}", self.sync.0, self.sync.1, if self.sync.2 { "on" } else { "off" })
+        format!(
+            "[SYNC] shortcut key 0x{:02X} mods 0x{:02X} {}",
+            self.sync.0,
+            self.sync.1,
+            if self.sync.2 { "on" } else { "off" }
+        )
     }
 
     /// Run one command line; returns what it prints, and what the link tells the other board.
@@ -325,7 +330,11 @@ pub struct FakeWorld {
 
 impl FakeWorld {
     pub fn new() -> FakeWorld {
-        FakeWorld { boards: [FakeBoard::new(Side::Left), FakeBoard::new(Side::Right)], sinks: [None, None], drive: None }
+        FakeWorld {
+            boards: [FakeBoard::new(Side::Left), FakeBoard::new(Side::Right)],
+            sinks: [None, None],
+            drive: None,
+        }
     }
 }
 
@@ -446,7 +455,9 @@ impl Bus for FakeBus {
         w.drive
             .map(|side| BootDrive {
                 mount: PathBuf::from(format!("/media/fake/NICENANO-{}", side.letter())),
-                info: BootInfo::parse("UF2 Bootloader 0.6.0 lib/nrfx (v2.0.0)\nModel: nice!nano\nBoard-ID: nRF52840-nicenano\n"),
+                info: BootInfo::parse(
+                    "UF2 Bootloader 0.6.0 lib/nrfx (v2.0.0)\nModel: nice!nano\nBoard-ID: nRF52840-nicenano\n",
+                ),
             })
             .into_iter()
             .collect()

@@ -178,7 +178,9 @@ impl Command {
             Command::Input(_) => matches!(reply, Reply::Input(_)),
             Command::CfgRead | Command::CfgWrite(_) => matches!(reply, Reply::Cfg(_)),
             Command::CfgDefault => matches!(reply, Reply::Cfg(_) | Reply::Sync(_)),
-            Command::ScanList => matches!(reply, Reply::Scan(ScanReply::Begin(_) | ScanReply::Listed(_) | ScanReply::End)),
+            Command::ScanList => {
+                matches!(reply, Reply::Scan(ScanReply::Begin(_) | ScanReply::Listed(_) | ScanReply::End))
+            }
             Command::PeerQuery => matches!(reply, Reply::Peer(PeerReply::Pin(_) | PeerReply::Attached(_))),
             Command::Profiles
             | Command::ProfileSave(_)
