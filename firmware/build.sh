@@ -77,6 +77,8 @@ for SIDE in RIGHT LEFT; do
     absent "$OUT/zephyr.dts" 'psels = < 0x9 >;|0x100000a|psels = < 0x24 >;|0x1000026' "no Pro Micro wire pins left"
     check "$OUT/zephyr.dts" 'code_partition: partition@27000' "starts at 0x27000, after the XIAO's SoftDevice 7.3.0"
     absent "$OUT/zephyr.map" 'qspi_nor_init' "external QSPI flash driver left out"
+    check "$OUT/zephyr.dts" 'gpio-hog;' "flash chip select (P0.25) held high"
+    check "$OUT/.config" '^CONFIG_GPIO_HOGS=y$' "GPIO hog support built in"
   elif [ "$SIDE" = LEFT ]; then
     check "$OUT/zephyr.dts" 'psels = < 0x9 >;' "wire TX on P0.09 (dev board)"
     check "$OUT/zephyr.dts" 'psels = < 0x100000a >;' "wire RX on P0.10 (Dev board)"
@@ -97,6 +99,13 @@ for SIDE in RIGHT LEFT; do
     check "$OUT/zephyr.dts" 'psels = < 0x1000008 >;' "USB bridge RX on P0.08"
   fi
   check "$OUT/.config" '^CONFIG_UART_1_ASYNC=y$' "USB bridge UART uses DMA receive"
+  # the bootloader clears RAM from 0x20008000 and writes 0x20007F7C on every reset
+  crash_at=$(awk '/^ \.noinit_jc_crash/ { getline; print $1; exit }' "$OUT/zephyr.map")
+  if [ -n "$crash_at" ] && [ $((crash_at + 16)) -le $((0x20007F7C)) ]; then
+    echo "  ok    crash record at $crash_at, below the RAM the bootloader touches"
+  else
+    echo "  FAIL  crash record at ${crash_at:-?}, must end by 0x20007F7C"; bad=1
+  fi
   check "$OUT/.config" '^CONFIG_BT_CTLR_TX_PWR_DBM=8$' "transmit power +8 dBm"
   absent "$OUT/zephyr.elf" 'LTK =' "private log no pairing key print left"
   absent "$OUT/zephyr.elf" ' keys=%02X' "private log, no key codes in the status line"

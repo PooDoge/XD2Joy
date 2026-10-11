@@ -74,6 +74,9 @@ if(NOT jc_version_rc EQUAL 0 OR NOT jc_version)
 endif()
 zephyr_compile_definitions(XD2JOY_FW_VERSION="${jc_version}")
 
+# keeps the crash record where the bootloader leaves it alone (see the file)
+zephyr_linker_sources(NOINIT noinit_first.ld)
+
 target_sources(app PRIVATE
     src/chip_addr.c
     src/console_keep.c

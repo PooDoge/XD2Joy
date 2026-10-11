@@ -5146,9 +5146,10 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 };
 
 /* What the last fatal error was, kept in RAM across the reset below so the next boot can print
- * it (CONFIG_LOG is off, so nothing else records it). */
+ * it (CONFIG_LOG is off, so nothing else records it). Its own section is placed first in .noinit
+ * by noinit_first.ld, below the RAM the UF2 bootloader clears on every reset. */
 #define JC_CRASH_MAGIC 0x4A43464CU
-static __noinit struct {
+static __attribute__((section(".noinit_jc_crash"), used)) struct {
 	uint32_t magic;
 	uint32_t reason;
 	uint32_t pc;
